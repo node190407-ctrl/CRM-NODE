@@ -6,9 +6,10 @@
 
 const AUTH_SESSION_KEY   = 'node_crm_session';
 const AUTH_PASSWORDS_KEY = 'node_crm_passwords';
+const AUTH_PROFILES_KEY  = 'node_crm_profiles';
 
 /** Estado en memoria */
-const AUTH = { isAuth: false, role: null }; // 'admin' | 'ventas' /' co ventas'
+const AUTH = { isAuth: false, role: null, profileId: null };
 
 /** Vistas permitidas por rol */
 const ROLE_VIEWS = {
@@ -17,16 +18,63 @@ const ROLE_VIEWS = {
   venta:  ['pipeline','contactos','actividades'],
 };
 
-const DEFAULT_PWD = { admin: 'admin', ventas: 'ventas' , venta: 'venta'};
+/* ── Perfiles por rol (fijos ahora, editables en el futuro desde configuración) ── */
+const DEFAULT_PROFILES = {
+  admin: [
+    { id: 'ceo',     nombre: 'CEO NODE',      cargo: 'Director General',        emoji: '👑', tel: '', email: '', pwd: 'ceo'     },
+    { id: 'cto',     nombre: 'CTO NODE',      cargo: 'Director de Tecnología',  emoji: '💻', tel: '', email: '', pwd: 'cto'     },
+    { id: 'gerente', nombre: 'Gerente NODE',   cargo: 'Gerente de Operaciones',  emoji: '📋', tel: '', email: '', pwd: 'gerente'  },
+  ],
+  ventas: [
+    { id: 'dir_ventas', nombre: 'Director Ventas',  cargo: 'Director Comercial',  emoji: '📈', tel: '', email: '', pwd: 'dir2'  },
+    { id: 'supervisor', nombre: 'Supervisor',        cargo: 'Supervisor de Ventas', emoji: '🔍', tel: '', email: '', pwd: 'sup2026'  },
+    { id: 'analista',   nombre: 'Analista Ventas',   cargo: 'Analista Comercial',  emoji: '📊', tel: '', email: '', pwd: 'analista2026' },
+  ],
+  venta: [
+    { id: 'vendedor1', nombre: 'Vendedor 1', cargo: 'Ejecutivo de Ventas', emoji: '🎯', tel: '', email: '', pwd: 'venta2026' },
+    { id: 'vendedor2', nombre: 'Vendedor 2', cargo: 'Ejecutivo de Ventas', emoji: '🎯', tel: '', email: '', pwd: 'venta2026' },
+    { id: 'vendedor3', nombre: 'Vendedor 3', cargo: 'Ejecutivo de Ventas', emoji: '🎯', tel: '', email: '', pwd: 'venta2026' },
+  ],
+};
 
-/* ── Contraseñas ── */
+/* ── Perfiles: leer y guardar ── */
+function getProfiles() {
+  try {
+    const raw = localStorage.getItem(AUTH_PROFILES_KEY);
+    if (!raw) return JSON.parse(JSON.stringify(DEFAULT_PROFILES)); // deep copy
+    const saved = JSON.parse(raw);
+    // Merge: usa datos guardados pero respeta estructura base
+    const result = JSON.parse(JSON.stringify(DEFAULT_PROFILES));
+    Object.keys(result).forEach(role => {
+      if (saved[role]) {
+        result[role] = result[role].map(p => {
+          const s = saved[role].find(x => x.id === p.id);
+          return s ? { ...p, ...s } : p;
+        });
+      }
+    });
+    return result;
+  } catch { return JSON.parse(JSON.stringify(DEFAULT_PROFILES)); }
+}
+
+function saveProfiles(profiles) {
+  localStorage.setItem(AUTH_PROFILES_KEY, JSON.stringify(profiles));
+}
+
+function getProfileById(role, profileId) {
+  return getProfiles()[role]?.find(p => p.id === profileId) || null;
+}
+
+const DEFAULT_PWD = { admin: 'admin', ventas: 'ventas', venta: 'venta' };
+
+/* ── Contraseñas de rol (legacy — ya no se usan para login pero se mantienen) ── */
 function getPasswords() {
   try {
     const raw = localStorage.getItem(AUTH_PASSWORDS_KEY);
     return raw ? { ...DEFAULT_PWD, ...JSON.parse(raw) } : { ...DEFAULT_PWD };
   } catch { return { ...DEFAULT_PWD }; }
 }
-function persistPasswords(admin, ventas, venta ) {
+function persistPasswords(admin, ventas, venta) {
   localStorage.setItem(AUTH_PASSWORDS_KEY, JSON.stringify({ admin, ventas, venta }));
 }
 
@@ -37,11 +85,14 @@ function restoreSession() {
     if (!raw) return false;
     const s = JSON.parse(raw);
     if (!s?.role) return false;
-    AUTH.isAuth = true; AUTH.role = s.role; return true;
+    AUTH.isAuth = true; AUTH.role = s.role; AUTH.profileId = s.profileId || null;
+    return true;
   } catch { return false; }
 }
-function persistSession(role) { sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify({ role })); }
-function clearSession()       { sessionStorage.removeItem(AUTH_SESSION_KEY); }
+function persistSession(role, profileId) {
+  sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify({ role, profileId }));
+}
+function clearSession() { sessionStorage.removeItem(AUTH_SESSION_KEY); }
 
 /* ── Guard ── */
 function canAccess(view) {
@@ -49,13 +100,92 @@ function canAccess(view) {
   return (ROLE_VIEWS[AUTH.role] || []).includes(view);
 }
 
-/* ── Login ── */
-function login() {
-  const roleEl  = document.querySelector('.role-card.active');
-  const pwdEl   = document.getElementById('login-pwd');
-  const errEl   = document.getElementById('login-error');
-  const role    = roleEl?.dataset.role;
-  const pwd     = pwdEl?.value || '';
+/* ── Login — Paso 1: seleccionar rol y mostrar perfiles ── */
+function loginStep1() {
+  const roleEl = document.querySelector('.role-card.active');
+  const errEl  = document.getElementById('login-error');
+  const role   = roleEl?.dataset.role;
+
+  const showError = (msg) => {
+    errEl.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> ${msg}`;
+    errEl.classList.remove('hidden');
+    const card = document.querySelector('.login-card');
+    card.classList.add('shake');
+    setTimeout(() => card.classList.remove('shake'), 450);
+  };
+
+  if (!role) return showError('Selecciona un rol de acceso.');
+  errEl.classList.add('hidden');
+
+  // Construir el paso 2: selector de perfil
+  const profiles = getProfiles()[role] || [];
+  const step1 = document.getElementById('login-step-1');
+  const step2 = document.getElementById('login-step-2');
+  const profileGrid = document.getElementById('login-profile-grid');
+  const roleBack = document.getElementById('login-role-back');
+
+  // Render de las cards de perfil
+  profileGrid.innerHTML = profiles.map(p => `
+    <button class="profile-card" data-profile-id="${p.id}" data-role="${role}"
+      role="radio" aria-checked="false">
+      <div class="profile-card-avatar">${p.emoji}</div>
+      <div class="profile-card-info">
+        <div class="profile-card-name">${escapeHTML(p.nombre)}</div>
+        <div class="profile-card-cargo">${escapeHTML(p.cargo)}</div>
+      </div>
+      <span class="role-card-check" aria-hidden="true">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+          fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+      </span>
+    </button>
+  `).join('');
+
+  // Listeners en las cards de perfil
+  profileGrid.querySelectorAll('.profile-card').forEach(card => {
+    card.addEventListener('click', () => {
+      profileGrid.querySelectorAll('.profile-card').forEach(c => {
+        c.classList.remove('active'); c.setAttribute('aria-checked','false');
+      });
+      card.classList.add('active'); card.setAttribute('aria-checked','true');
+      document.getElementById('login-pwd-step2')?.focus();
+    });
+  });
+
+  // Botón volver
+  roleBack.onclick = () => {
+    step2.classList.add('hidden');
+    step1.classList.remove('hidden');
+    document.getElementById('login-pwd-step2').value = '';
+    document.getElementById('login-error-step2').classList.add('hidden');
+  };
+
+  // Animación de transición
+  step1.style.opacity = '0';
+  step1.style.transform = 'translateX(-16px)';
+  setTimeout(() => {
+    step1.classList.add('hidden');
+    step1.style.opacity = '';
+    step1.style.transform = '';
+    step2.classList.remove('hidden');
+    step2.style.opacity = '0';
+    step2.style.transform = 'translateX(16px)';
+    requestAnimationFrame(() => {
+      step2.style.transition = 'opacity 240ms ease, transform 240ms ease';
+      step2.style.opacity = '1';
+      step2.style.transform = 'translateX(0)';
+      setTimeout(() => { step2.style.transition = ''; step2.style.transform = ''; }, 250);
+    });
+  }, 180);
+}
+
+/* ── Login — Paso 2: validar contraseña del perfil y entrar ── */
+function loginStep2() {
+  const profileCard = document.querySelector('#login-profile-grid .profile-card.active');
+  const pwdEl  = document.getElementById('login-pwd-step2');
+  const errEl  = document.getElementById('login-error-step2');
+  const profileId = profileCard?.dataset.profileId;
+  const role      = profileCard?.dataset.role;
+  const pwd       = pwdEl?.value || '';
 
   const showError = (msg) => {
     errEl.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> ${msg}`;
@@ -66,40 +196,58 @@ function login() {
     if (pwdEl) { pwdEl.value = ''; pwdEl.focus(); }
   };
 
-  if (!role) return showError('Selecciona un rol de acceso.');
-  if (!pwd)  return showError('Ingresa tu contraseña.');
-  if (pwd !== getPasswords()[role]) return showError('Contraseña incorrecta. Intenta de nuevo.');
+  if (!profileId) return showError('Selecciona tu perfil de acceso.');
+  if (!pwd)       return showError('Ingresa tu contraseña.');
+
+  const profile = getProfileById(role, profileId);
+  if (!profile || pwd !== profile.pwd) return showError('Contraseña incorrecta. Intenta de nuevo.');
 
   // ✅ Éxito
-  AUTH.isAuth = true; AUTH.role = role;
-  persistSession(role);
+  AUTH.isAuth = true; AUTH.role = role; AUTH.profileId = profileId;
+  persistSession(role, profileId);
   errEl.classList.add('hidden');
   document.getElementById('login-screen').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
-  applyRole();
- wireUpButtons();
-setupSearch();
-setupQuickMenu();
-setupKeyboard();
-setupClock();
 
-// Navegar a la primera vista permitida del rol (venta no tiene dashboard)
+  // Reset login para próxima vez
+  document.getElementById('login-step-2').classList.add('hidden');
+  document.getElementById('login-step-1').classList.remove('hidden');
+  pwdEl.value = '';
+
+  applyRole();
+  wireUpButtons();
+  setupSearch();
+  setupQuickMenu();
+  setupKeyboard();
+  setupClock();
+
   const firstView = ROLE_VIEWS[AUTH.role]?.[0] || 'pipeline';
   navigate(firstView);
+
+  // Revisar notificaciones al entrar + cada 30 minutos
+  setTimeout(checkNotificaciones, 2000);
+  setInterval(checkNotificaciones, 30 * 60 * 1000);
 }
+
+// Alias para compatibilidad con el botón original (ya no se usa pero por si acaso)
+function login() { loginStep1(); }
 
 /* ── Logout ── */
 function logout() {
-  AUTH.isAuth = false; AUTH.role = null;
+  AUTH.isAuth = false; AUTH.role = null; AUTH.profileId = null;
   clearSession();
   S.view='dashboard'; S.searchQuery=''; S.filterFuente=''; S.filterActTipo='';
   Object.values(S.charts).forEach(c => c?.destroy?.()); S.charts = {};
   S.sortables.forEach(s => s?.destroy?.()); S.sortables = [];
   document.getElementById('app').classList.add('hidden');
   document.getElementById('login-screen').classList.remove('hidden');
-  const pwdEl = document.getElementById('login-pwd');
-  if (pwdEl) { pwdEl.value = ''; pwdEl.type = 'password'; }
+  // Reset login al paso 1
+  document.getElementById('login-step-1')?.classList.remove('hidden');
+  document.getElementById('login-step-2')?.classList.add('hidden');
+  document.getElementById('login-pwd-step2') && (document.getElementById('login-pwd-step2').value = '');
+  document.getElementById('login-pwd-step2') && (document.getElementById('login-pwd-step2').type = 'password');
   document.getElementById('login-error')?.classList.add('hidden');
+  document.getElementById('login-error-step2')?.classList.add('hidden');
   document.getElementById('eye-open')?.classList.remove('hidden');
   document.getElementById('eye-closed')?.classList.add('hidden');
 }
@@ -109,17 +257,22 @@ function applyRole() {
   const role  = AUTH.role;
   const badge = document.getElementById('role-badge');
 
-  // Metadatos de cada rol
   const ROLE_META = {
-    admin:  { icon: '👑', label: 'Admin',       cls: 'role-admin',  nombre: S.config.usuario },
-    ventas: { icon: '📈', label: 'Dir. Ventas', cls: 'role-ventas', nombre: 'Director Ventas' },
-    venta:  { icon: '🎯', label: 'Venta NODE',  cls: 'role-venta',  nombre: 'Venta NODE' },
+    admin:  { icon: '👑', label: 'Admin',       cls: 'role-admin'  },
+    ventas: { icon: '📈', label: 'Dir. Ventas', cls: 'role-ventas' },
+    venta:  { icon: '🎯', label: 'Venta NODE',  cls: 'role-venta'  },
   };
   const meta = ROLE_META[role] || ROLE_META.ventas;
 
+  // Obtener datos del perfil activo
+  const profile = AUTH.profileId ? getProfileById(role, AUTH.profileId) : null;
+  const nombre  = profile?.nombre || meta.label;
+  const cargo   = profile?.cargo  || '';
+  const emoji   = profile?.emoji  || meta.icon;
+
   // Badge del sidebar
   if (badge) {
-    badge.textContent = meta.icon + ' ' + meta.label;
+    badge.textContent = emoji + ' ' + meta.label;
     badge.className   = 'role-badge ' + meta.cls;
   }
 
@@ -128,9 +281,19 @@ function applyRole() {
     btn.classList.toggle('hidden', !canAccess(btn.dataset.view));
   });
 
-  // Nombre y avatar del sidebar
-  document.getElementById('sidebar-user-name').textContent = meta.nombre;
-  document.getElementById('sidebar-avatar').textContent    = initials(meta.nombre);
+  // Nombre, cargo y avatar del sidebar
+  const nameEl  = document.getElementById('sidebar-user-name');
+  const cargoEl = document.getElementById('sidebar-user-cargo');
+  const avatarEl = document.getElementById('sidebar-avatar');
+  if (nameEl)  nameEl.textContent  = nombre;
+  if (cargoEl) cargoEl.textContent = cargo;
+  if (avatarEl) avatarEl.textContent = initials(nombre);
+
+  // Datos de contacto en sidebar (tel/email del perfil)
+  const telEl   = document.getElementById('sidebar-user-tel');
+  const emailEl = document.getElementById('sidebar-user-email');
+  if (telEl)   { telEl.textContent   = profile?.tel   || ''; telEl.parentElement?.classList.toggle('hidden', !profile?.tel); }
+  if (emailEl) { emailEl.textContent = profile?.email || ''; emailEl.parentElement?.classList.toggle('hidden', !profile?.email); }
 }
 
 /* ── Guardar contraseñas (solo admin) ── */
@@ -148,24 +311,35 @@ function savePasswords() {
 
 /* ── Setup del login screen ── */
 function setupLoginScreen() {
+  // Paso 1 — selección de rol
   document.querySelectorAll('.role-card').forEach(card => {
     card.addEventListener('click', () => {
-      document.querySelectorAll('.role-card').forEach(c => { c.classList.remove('active'); c.setAttribute('aria-checked','false'); });
+      document.querySelectorAll('.role-card').forEach(c => {
+        c.classList.remove('active'); c.setAttribute('aria-checked','false');
+      });
       card.classList.add('active'); card.setAttribute('aria-checked','true');
-      document.getElementById('login-pwd')?.focus();
     });
   });
-  document.getElementById('btn-login')?.addEventListener('click', login);
-  document.getElementById('login-pwd')?.addEventListener('keydown', e => {
-    if (e.key === 'Enter') login();
-    else document.getElementById('login-error')?.classList.add('hidden');
+
+  // Botón "Continuar" del paso 1
+  document.getElementById('btn-login-step1')?.addEventListener('click', loginStep1);
+
+  // Botón "Ingresar" del paso 2
+  document.getElementById('btn-login-step2')?.addEventListener('click', loginStep2);
+
+  // Enter en el campo de contraseña del paso 2
+  document.getElementById('login-pwd-step2')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') loginStep2();
+    else document.getElementById('login-error-step2')?.classList.add('hidden');
   });
-  document.getElementById('btn-toggle-pwd')?.addEventListener('click', () => {
-    const inp = document.getElementById('login-pwd');
+
+  // Toggle ojo en contraseña del paso 2
+  document.getElementById('btn-toggle-pwd-step2')?.addEventListener('click', () => {
+    const inp  = document.getElementById('login-pwd-step2');
     const show = inp.type === 'password';
     inp.type = show ? 'text' : 'password';
-    document.getElementById('eye-open')?.classList.toggle('hidden', show);
-    document.getElementById('eye-closed')?.classList.toggle('hidden', !show);
+    document.getElementById('eye-open-2')?.classList.toggle('hidden', show);
+    document.getElementById('eye-closed-2')?.classList.toggle('hidden', !show);
   });
 }
 
@@ -319,7 +493,12 @@ function seedData() {
     { id:'d11',titulo:'Bundle PRO Upsell',        contactoId:'c3', valor:14500, etapa:'upsell',        fechaLimite:'2026-07-15', proximaAccion:'Proponer bundle PRO en llamada', notas:'NPS 9. Lista para crecer.', creadoEn:ago(5),  actualizadoEn:ago(0)  },
     { id:'d12',titulo:'Opor. Calificada — POS',   contactoId:'c2', valor:9500,  etapa:'opor_cal',      fechaLimite:'2026-06-30', proximaAccion:'Enviar propuesta P7 + POS',    notas:'MEDDIC 5/6.',               creadoEn:ago(4),  actualizadoEn:ago(1)  },
   ];
-
+S.deals.forEach(d => {
+  if (['ganado', 'onboarding'].includes(d.etapa) && !d.onboardingStartedAt) {
+    d.onboardingStartedAt = d.actualizadoEn || d.creadoEn;
+  }
+});
+saveState();
   S.actividades = [
     { id:'a1',  tipo:'whatsapp',  contactoId:'c3', descripcion:'Revisó la propuesta B2. Pide pago en 2 parcialidades, avaluamos acepta.',   creadoEn:ago(1)  },
     { id:'a2',  tipo:'llamada',   contactoId:'c2', descripcion:'Confirmó demo del cotizador para el miércoles 10am. Muy entusiasmado.',      creadoEn:ago(2)  },
@@ -833,7 +1012,7 @@ function dealCardHTML(d) {
     const MS_DAY = 86_400_000;
 
     // Usar onboardingStartedAt si existe, si no actualizadoEn, si no creadoEn
-    const inicio  = d.onboardingStartedAt || d.actualizadoEn || d.creadoEn;
+    const inicio = d.onboardingStartedAt ?? d.creadoEn;
     const daysSince = Math.floor((Date.now() - inicio) / MS_DAY);
     const progress  = Math.min(daysSince, 14);
     const pct       = Math.round((progress / 14) * 100);
@@ -906,9 +1085,7 @@ function initKanbanSortable() {
         if (deal && deal.etapa !== newEtapa) {
           deal.etapa = newEtapa;
           deal.actualizadoEn = Date.now();
-          deal.etapa = newEtapa;
-         deal.actualizadoEn = Date.now();
-
+        
          // ← AGREGAR: registrar cuándo inició el onboarding
         if (['ganado','onboarding'].includes(newEtapa) && !deal.onboardingStartedAt) {
          deal.onboardingStartedAt = Date.now();
@@ -1192,6 +1369,8 @@ function closeAllModals() {
   const ov = document.getElementById('modal-overlay');
   ov.classList.add('hidden');
   ov.setAttribute('aria-hidden', 'true');
+  // Cerrar también el modal de perfil (no tiene clase .modal)
+  document.getElementById('modal-mi-perfil')?.classList.add('hidden');
 }
 
 /* ── 13. MODAL — CONTACTO ──────────────────────────────────── */
@@ -1343,6 +1522,17 @@ function saveDeal() {
     // ── Nuevo deal: guardar + registrar actividad automática ──
     const newDealId = 'd' + uid();
     S.deals.push({ id: newDealId, creadoEn: now, ...data });
+    // ── Notificación deal nuevo → acumular en panel + enviar por WA ──
+    const _perfilActivo = getProfileById(AUTH.role, AUTH.profileId);
+    const _datosDeal = {
+      titulo:        titulo,
+      contacto:      data.contacto || getContacto(data.contactoId)?.nombre || 'Sin contacto',
+      valor:         data.valor ? fmtMXN(data.valor) : 'No definido',
+      proximaAccion: data.proximaAccion || 'Sin definir',
+      vendedor:      _perfilActivo?.nombre || 'Sin asignar',
+    };
+    acumularNotificacion('deal_nuevo', _datosDeal, _perfilActivo);
+    notificarWhatsApp('deal_nuevo', _datosDeal, 'admin');
 
     const etapaLabel = getEtapa(data.etapa).label;
     const partes = [
@@ -1803,6 +1993,8 @@ function wireUpButtons() {
 
   // Deal drawer
   setupDrawer();
+  // Panel de notificaciones
+  setupNotifPanel();
 }
 
 /* ── 23. INIT ──────────────────────────────────────────────── */
@@ -1818,6 +2010,9 @@ function init() {
   if (restoreSession()) {
     document.getElementById('login-screen').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
+    // Asegurar que el login quede en paso 1 por si se recarga
+    document.getElementById('login-step-1')?.classList.remove('hidden');
+    document.getElementById('login-step-2')?.classList.add('hidden');
 
     applyRole();
     wireUpButtons();
@@ -1830,11 +2025,466 @@ function init() {
     const firstView = ROLE_VIEWS[AUTH.role]?.[0] || 'pipeline';
     navigate(firstView);
 
+    // Revisar notificaciones al cargar + cada 30 minutos
+    setTimeout(checkNotificaciones, 2000);
+    setInterval(checkNotificaciones, 30 * 60 * 1000);
+
   } else {
     // Sin sesión → mostrar login
     document.getElementById('login-screen').classList.remove('hidden');
     document.getElementById('app').classList.add('hidden');
   }
 }
+//SISTEMA DE NOTIFICACIONES DE NODE
+/**
+ * @param{string} tel numero con lada 
+ * @param{string} mensaje mensaje que se mandara
+ */
+function enviarWhatsApp(tel,mensaje){
+  if(!tel) {
+    console.warn('enviarWhatsApp: numero no definido');
+    return;
+  }
+  const url = `https://wa.me/${tel.replace(/[\s\-\+]/g, '')}?text=${encodeURIComponent(mensaje)}`;
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+/**
+ * PIEZA 2 — Constructor de mensajes
+ * Recibe el tipo de evento y los datos del deal,
+ * regresa el texto listo para enviar por WhatsApp.
+ */
+function construirMensajeWa(tipo, datos) {
+  const empresa = S.config.empresa || 'NODE CRM';
+  const hoy     = new Date().toLocaleDateString('es-MX', { 
+    day:'2-digit', month:'short', year:'numeric' 
+  });
+
+  const plantillas = {
+
+    // Evento 1 — Deal nuevo creado
+    deal_nuevo: `🆕 *${empresa}*
+📅 ${hoy}
+
+Un cliente solicitó un servicio:
+• Deal: ${datos.titulo}
+• Cliente: ${datos.contacto}
+• Valor: ${datos.valor}
+• Próxima acción: ${datos.proximaAccion}
+• 👤 Generado por: ${datos.vendedor || 'Sin asignar'}
+
+Entra al CRM para dar seguimiento.`,
+
+    // Evento 2 — Reunión próxima (fecha límite cercana)
+    reunion_proxima: `📅 *${empresa}*
+⚠️ Reunión próxima
+
+- Deal: ${datos.titulo}
+- Cliente: ${datos.contacto}
+- Fecha límite: ${datos.fechaLimite}
+- Faltan: ${datos.diasRestantes} día(s)
+- Próxima acción: ${datos.proximaAccion}
+
+Prepárate para la reunión.`,
+
+    // Evento 3 — Deal sin actividad
+    sin_actividad: `⚠️ *${empresa}*
+😴 Deal sin actividad
+
+- Deal: ${datos.titulo}
+- Cliente: ${datos.contacto}
+- Días sin actividad: ${datos.diasSinActividad}
+- Última acción: ${datos.ultimaAccion}
+
+Retoma el contacto hoy.`,
+
+  };
+
+  return plantillas[tipo] || `📌 ${empresa}: Notificación del CRM — ${hoy}`;
+}
+/**
+ * notificar a la central el deal con los numeros registrados
+ * @param {string} tipo -deal nuevo,reunion proxima.sin actividad
+ * @param {object} datos -datos deal que se dispara
+ * @param {string} rol -rol que recibe la notificacion
+ */
+function notificarWhatsApp(tipo, datos, rol = null){
+  const mensaje = construirMensajeWa(tipo, datos);
+  const perfiles = getProfiles ();
+  // RECORRER LOS ROLES O INDICADO
+  const rolesANotificar = rol ?[rol] : Object.keys(perfiles);
+  rolesANotificar.forEach(r => {
+    perfiles[r].forEach(perfil => {
+      if (perfil.tel) {
+        enviarWhatsApp(perfil.tel, mensaje);
+      }
+    });
+  }); 
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PANEL DE NOTIFICACIONES PENDIENTES
+   ═══════════════════════════════════════════════════════════════ */
+
+const NOTIF_STORE_KEY = 'node_notif_pendientes';
+
+/* ── Leer y guardar notificaciones pendientes ── */
+function getNotifPendientes() {
+  try {
+    return JSON.parse(localStorage.getItem(NOTIF_STORE_KEY) || '[]');
+  } catch { return []; }
+}
+function saveNotifPendientes(lista) {
+  localStorage.setItem(NOTIF_STORE_KEY, JSON.stringify(lista));
+}
+
+/* ── Agregar una notificación al panel (no la envía, la acumula) ── */
+function acumularNotificacion(tipo, datos, perfilOrigen) {
+  const lista = getNotifPendientes();
+  const id    = 'n' + Date.now() + Math.random().toString(36).slice(2, 6);
+  lista.unshift({
+    id,
+    tipo,       // 'reunion_proxima' | 'sin_actividad' | 'deal_nuevo'
+    datos,      // datos del deal
+    perfil: perfilOrigen || null,   // perfil que generó la alerta
+    ts: Date.now(),
+    enviada: false,
+  });
+  // Máximo 50 notificaciones en el panel
+  if (lista.length > 50) lista.length = 50;
+  saveNotifPendientes(lista);
+  actualizarBadge();
+}
+
+/* ── Actualizar el badge contador de la campana ── */
+function actualizarBadge() {
+  const lista    = getNotifPendientes().filter(n => !n.enviada);
+  const badge    = document.getElementById('notif-bell-count');
+  const bell     = document.getElementById('btn-notif-bell');
+  const countEl  = document.getElementById('notif-panel-count');
+  const total    = lista.length;
+
+  if (badge) {
+    badge.textContent = total > 99 ? '99+' : total;
+    badge.classList.toggle('hidden', total === 0);
+  }
+  if (bell) bell.classList.toggle('has-notif', total > 0);
+  if (countEl) countEl.textContent = total;
+}
+
+/* ── Renderizar el panel ── */
+function renderNotifPanel() {
+  const lista   = getNotifPendientes();
+  const listEl  = document.getElementById('notif-list');
+  const emptyEl = document.getElementById('notif-empty');
+  if (!listEl) return;
+
+  const pendientes = lista.filter(n => !n.enviada);
+
+  if (pendientes.length === 0) {
+    listEl.innerHTML = '';
+    emptyEl?.classList.remove('hidden');
+    return;
+  }
+  emptyEl?.classList.add('hidden');
+
+  const TIPO_META = {
+    reunion_proxima: { label: '📅 Reunión próxima', cls: 'reunion' },
+    sin_actividad:   { label: '😴 Sin actividad',   cls: 'sinactividad' },
+    deal_nuevo:      { label: '🆕 Deal nuevo',       cls: 'deal_nuevo' },
+  };
+
+  listEl.innerHTML = pendientes.map(n => {
+    const meta    = TIPO_META[n.tipo] || { label: '📌 Alerta', cls: 'reunion' };
+    const tiempo  = timeAgo(n.ts);
+    const perfil  = n.perfil;
+
+    // Detalle según tipo
+    let detalle = '';
+    if (n.tipo === 'reunion_proxima') {
+      detalle = `Fecha: ${n.datos.fechaLimite} · Faltan ${n.datos.diasRestantes} día(s)<br>Acción: ${escapeHTML(n.datos.proximaAccion || '—')}`;
+    } else if (n.tipo === 'sin_actividad') {
+      detalle = `${n.datos.diasSinActividad} días sin actividad<br>Última acción: ${escapeHTML(n.datos.ultimaAccion || '—')}`;
+    } else if (n.tipo === 'deal_nuevo') {
+      detalle = `Valor: ${n.datos.valor}<br>Acción: ${escapeHTML(n.datos.proximaAccion || '—')}`;
+    }
+
+    // Card del perfil origen
+    const perfilHTML = perfil ? `
+      <div class="notif-card-perfil">
+        <div class="notif-card-perfil-avatar">${initials(perfil.nombre)}</div>
+        <div class="notif-card-perfil-info">
+          Generado por <strong>${escapeHTML(perfil.nombre)}</strong>
+          · ${escapeHTML(perfil.cargo || perfil.rol || '')}
+        </div>
+      </div>` : '';
+
+    return `
+      <div class="notif-card" data-notif-id="${n.id}">
+        <div class="notif-card-header">
+          <span class="notif-card-tipo ${meta.cls}">${meta.label}</span>
+          <span class="notif-card-time">${tiempo}</span>
+        </div>
+        <div class="notif-card-body">
+          <div class="notif-card-deal">${escapeHTML(n.datos.titulo || '—')}</div>
+          <div class="notif-card-cliente">👤 ${escapeHTML(n.datos.contacto || '—')}</div>
+          <div class="notif-card-detail">${detalle}</div>
+        </div>
+        ${perfilHTML}
+        <div class="notif-card-footer">
+          <button class="notif-btn-send" onclick="enviarNotifWA('${n.id}')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M11.999 0C5.373 0 0 5.373 0 12c0 2.117.553 4.103 1.519 5.831L0 24l6.335-1.663A11.945 11.945 0 0 0 12 24c6.627 0 12-5.373 12-12S18.626 0 11.999 0zm.001 21.818a9.814 9.814 0 0 1-5.001-1.371l-.358-.214-3.724.977.995-3.63-.235-.374A9.82 9.82 0 0 1 2.18 12c0-5.418 4.402-9.818 9.82-9.818 5.418 0 9.818 4.4 9.818 9.818 0 5.417-4.4 9.818-9.818 9.818z"/></svg>
+            Enviar por WhatsApp
+          </button>
+          <button class="notif-btn-dismiss" onclick="dismissNotif('${n.id}')" title="Descartar">
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+/* ── Abrir / cerrar panel ── */
+function toggleNotifPanel() {
+  const panel    = document.getElementById('notif-panel');
+  const backdrop = document.getElementById('notif-backdrop');
+  const isOpen   = !panel.classList.contains('hidden');
+
+  if (isOpen) {
+    panel.classList.add('hidden');
+    backdrop.classList.add('hidden');
+  } else {
+    renderNotifPanel();
+    panel.classList.remove('hidden');
+    backdrop.classList.remove('hidden');
+  }
+}
+
+function cerrarNotifPanel() {
+  document.getElementById('notif-panel')?.classList.add('hidden');
+  document.getElementById('notif-backdrop')?.classList.add('hidden');
+}
+
+/* ── Enviar una notificación individual por WhatsApp ── */
+function enviarNotifWA(notifId) {
+  const lista  = getNotifPendientes();
+  const notif  = lista.find(n => n.id === notifId);
+  if (!notif) return;
+
+  const mensaje = construirMensajeWa(notif.tipo, {
+    ...notif.datos,
+    vendedor: notif.perfil?.nombre || 'Sin asignar',
+  });
+
+  // Obtener perfiles admin con número
+  const perfiles = getProfiles()['admin'] || [];
+  const conTel   = perfiles.filter(p => p.tel);
+
+  if (conTel.length === 0) {
+    toast('Sin número', 'Agrega un teléfono a los perfiles admin para enviar notificaciones.', 'warn');
+    return;
+  }
+
+  // Abrir WhatsApp para cada perfil admin con número
+  conTel.forEach((p, i) => {
+    setTimeout(() => enviarWhatsApp(p.tel, mensaje), i * 600);
+  });
+
+  // Marcar como enviada
+  notif.enviada = true;
+  saveNotifPendientes(lista);
+  actualizarBadge();
+
+  // Actualizar la card en el panel con animación
+  const card = document.querySelector(`.notif-card[data-notif-id="${notifId}"]`);
+  if (card) {
+    card.style.opacity = '0.4';
+    card.style.transition = 'opacity 300ms';
+    setTimeout(() => { renderNotifPanel(); actualizarBadge(); }, 500);
+  }
+
+  toast('WhatsApp abierto', `Enviando a ${conTel.length} perfil(es) admin.`, 'success');
+}
+
+/* ── Enviar TODAS las notificaciones pendientes ── */
+function enviarTodasNotif() {
+  const lista     = getNotifPendientes().filter(n => !n.enviada);
+  if (lista.length === 0) {
+    toast('Sin pendientes', 'No hay notificaciones por enviar.', 'info');
+    return;
+  }
+
+  const perfiles = getProfiles()['admin']?.filter(p => p.tel) || [];
+  if (perfiles.length === 0) {
+    toast('Sin número', 'Agrega un teléfono a los perfiles admin.', 'warn');
+    return;
+  }
+
+  let delay = 0;
+  lista.forEach(notif => {
+    const mensaje = construirMensajeWa(notif.tipo, {
+      ...notif.datos,
+      vendedor: notif.perfil?.nombre || 'Sin asignar',
+    });
+    perfiles.forEach(p => {
+      setTimeout(() => enviarWhatsApp(p.tel, mensaje), delay);
+      delay += 700;
+    });
+    notif.enviada = true;
+  });
+
+  saveNotifPendientes(getNotifPendientes()); // no releer — ya mutamos
+  const all = getNotifPendientes();
+  all.forEach(n => { if (lista.find(x => x.id === n.id)) n.enviada = true; });
+  saveNotifPendientes(all);
+
+  setTimeout(() => { renderNotifPanel(); actualizarBadge(); }, 400);
+  toast('Enviando', `${lista.length} notificaciones abiertas en WhatsApp.`, 'success');
+}
+
+/* ── Descartar una notificación ── */
+function dismissNotif(notifId) {
+  const lista = getNotifPendientes();
+  const n     = lista.find(x => x.id === notifId);
+  if (n) { n.enviada = true; saveNotifPendientes(lista); }
+  renderNotifPanel();
+  actualizarBadge();
+}
+
+/* ── Limpiar todas (marcar enviadas) ── */
+function limpiarNotifs() {
+  const lista = getNotifPendientes().map(n => ({ ...n, enviada: true }));
+  saveNotifPendientes(lista);
+  renderNotifPanel();
+  actualizarBadge();
+  toast('Listo', 'Notificaciones marcadas como leídas.', 'success');
+}
+
+/* ── Setup del panel (llamar en wireUpButtons) ── */
+function setupNotifPanel() {
+  document.getElementById('btn-notif-bell')?.addEventListener('click', toggleNotifPanel);
+  document.getElementById('btn-close-notif')?.addEventListener('click', cerrarNotifPanel);
+  document.getElementById('notif-backdrop')?.addEventListener('click', cerrarNotifPanel);
+  document.getElementById('btn-send-all-notif')?.addEventListener('click', enviarTodasNotif);
+  document.getElementById('btn-clear-notif')?.addEventListener('click', limpiarNotifs);
+  // Actualizar badge al cargar
+  actualizarBadge();
+}
 
 document.addEventListener('DOMContentLoaded', init);
+/* ═══════════════════════════════════════════════════════════════
+   MODAL MI PERFIL
+   ═══════════════════════════════════════════════════════════════ */
+
+function abrirModalPerfil() {
+  const role      = AUTH.role;
+  const profileId = AUTH.profileId;
+  const profile   = getProfileById(role, profileId);
+  if (!profile) return;
+
+  document.getElementById('perfil-modal-avatar').textContent = initials(profile.nombre);
+  document.getElementById('perfil-modal-nombre').textContent = profile.nombre;
+  document.getElementById('perfil-modal-cargo').textContent  = profile.cargo;
+  document.getElementById('perfil-modal-rol').textContent    =
+    role === 'admin' ? '👑 Administrador' :
+    role === 'ventas' ? '📈 Director de Ventas' : '🎯 Venta NODE';
+  document.getElementById('perfil-tel').value   = profile.tel   || '';
+  document.getElementById('perfil-email').value = profile.email || '';
+
+  document.getElementById('modal-mi-perfil').classList.remove('hidden');
+  setTimeout(() => document.getElementById('perfil-tel').focus(), 80);
+}
+
+function guardarMiPerfil() {
+  const role      = AUTH.role;
+  const profileId = AUTH.profileId;
+  const tel       = document.getElementById('perfil-tel').value.trim().replace(/[\s\-\+]/g, '');
+  const email     = document.getElementById('perfil-email').value.trim();
+
+  if (tel && !/^[0-9]{12,13}$/.test(tel)) {
+    toast('Teléfono inválido', 'Debe tener 12 o 13 dígitos sin espacios. Ej: 5215512345678', 'error');
+    return;
+  }
+
+  const profiles = getProfiles();
+  const perfil   = profiles[role]?.find(p => p.id === profileId);
+  if (!perfil) return;
+
+  perfil.tel   = tel;
+  perfil.email = email;
+  saveProfiles(profiles);
+
+  // Actualizar sidebar en tiempo real
+  const telEl   = document.getElementById('sidebar-user-tel');
+  const emailEl = document.getElementById('sidebar-user-email');
+  if (telEl)   { telEl.textContent = tel;   telEl.parentElement?.classList.toggle('hidden', !tel);   }
+  if (emailEl) { emailEl.textContent = email; emailEl.parentElement?.classList.toggle('hidden', !email); }
+
+  closeAllModals();
+  toast('Perfil actualizado', 'Tu número y correo han sido guardados.', 'success');
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   DETECTORES DE EVENTOS — NOTIFICACIONES AUTOMÁTICAS
+   ═══════════════════════════════════════════════════════════════ */
+
+/**
+ * Revisa todos los deals activos y dispara notificaciones WA si:
+ *  1. La fecha límite es en 1 o 2 días (reunión próxima)
+ *  2. El deal lleva 3+ días sin actividad (sin_actividad)
+ * Se llama al cargar el CRM y cada 30 minutos.
+ */
+function checkNotificaciones() {
+  const ahora    = Date.now();
+  const MS_DIA   = 86_400_000;
+  const etapasIgnorar = ['ganado', 'perdido'];
+
+  // Cargar registro de notificaciones ya enviadas hoy
+  // para no mandar el mismo aviso 2 veces en el mismo día
+  const HOY_KEY  = 'node_notif_' + new Date().toISOString().slice(0, 10);
+  let   enviados = JSON.parse(localStorage.getItem(HOY_KEY) || '[]');
+
+  S.deals.forEach(deal => {
+    if (etapasIgnorar.includes(deal.etapa)) return;
+
+    const contacto = S.contactos.find(c => c.id === deal.contactoId);
+    const nomContacto = contacto?.nombre || 'Sin contacto';
+
+    // ── Detector 1: Reunión próxima (fecha límite en 1 o 2 días) ──
+    if (deal.fechaLimite) {
+      const limite      = new Date(deal.fechaLimite).getTime();
+      const diasRestantes = Math.ceil((limite - ahora) / MS_DIA);
+      const keyReunion  = `reunion_${deal.id}_${diasRestantes}d`;
+
+      if ((diasRestantes === 1 || diasRestantes === 2) && !enviados.includes(keyReunion)) {
+        const perfilOrigen = AUTH.profileId ? getProfileById(AUTH.role, AUTH.profileId) : null;
+        acumularNotificacion('reunion_proxima', {
+          titulo:         deal.titulo,
+          contacto:       nomContacto,
+          fechaLimite:    fmtDate(deal.fechaLimite),
+          diasRestantes:  diasRestantes,
+          proximaAccion:  deal.proximaAccion || 'Sin definir',
+        }, perfilOrigen);
+        enviados.push(keyReunion);
+      }
+    }
+
+    // ── Detector 2: Deal sin actividad (3+ días) ──
+    const ultimaAct     = deal.actualizadoEn || deal.creadoEn;
+    const diasSinAct    = Math.floor((ahora - ultimaAct) / MS_DIA);
+    const keySinAct     = `sinact_${deal.id}_${Math.floor(diasSinAct / 3)}`; // una vez cada 3 días
+
+    if (diasSinAct >= 3 && !enviados.includes(keySinAct)) {
+      const perfilOrigen = AUTH.profileId ? getProfileById(AUTH.role, AUTH.profileId) : null;
+      acumularNotificacion('sin_actividad', {
+        titulo:           deal.titulo,
+        contacto:         nomContacto,
+        diasSinActividad: diasSinAct,
+        ultimaAccion:     deal.proximaAccion || 'Sin registrar',
+      }, perfilOrigen);
+      enviados.push(keySinAct);
+    }
+  });
+
+  // Guardar registro del día
+  localStorage.setItem(HOY_KEY, JSON.stringify(enviados));
+}
