@@ -13,10 +13,118 @@ const AUTH = { isAuth: false, role: null, profileId: null };
 
 /** Vistas permitidas por rol */
 const ROLE_VIEWS = {
-  admin:  ['dashboard','pipeline','contactos','actividades','configuracion'],
-  ventas: ['dashboard','pipeline','contactos','actividades'],
-  venta:  ['pipeline','contactos','actividades'],
+  admin:     ['dashboard','pipeline','contactos','actividades','configuracion'],
+  ventas:    ['dashboard','pipeline','contactos','actividades'],
+  venta:     ['pipeline','contactos','actividades'],   // sin dashboard ni configuracion
+  prospecto: ['prospecto-form'],
 };
+
+/* ═══════════════════════════════════════════════════════════════
+   NOTIFICACIONES — STORE POR DESTINATARIO
+   Cada rol/perfil tiene su propio "buzón" de notificaciones.
+   Clave: node_notif_[destinatario]
+   Destinatarios:
+     · 'admin'   → todos los admins ven TODO (deals + prospectos)
+     · 'ventas'  → director ve TODO (igual que admin)
+     · 'venta_[profileId]' → cada vendedor ve solo sus propios deals
+   ═══════════════════════════════════════════════════════════════ */
+
+/** Devuelve la clave de localStorage para el buzón de un destinatario */
+function notifKey(destinatario) {
+  return 'node_notif_' + destinatario;
+}
+
+/** Leer notificaciones de un buzón específico */
+function getNotifDe(destinatario) {
+  try { return JSON.parse(localStorage.getItem(notifKey(destinatario)) || '[]'); }
+  catch { return []; }
+}
+
+/** Guardar notificaciones en un buzón específico */
+function saveNotifDe(destinatario, lista) {
+  localStorage.setItem(notifKey(destinatario), JSON.stringify(lista));
+}
+
+/**
+ * Acumula una notificación en los buzones correctos según las reglas:
+ *  - ADMIN:  recibe TODAS las notificaciones de todos los perfiles
+ *  - VENTAS (director): recibe TODAS las notificaciones de todos los perfiles
+ *  - VENTA [profileId]: recibe SOLO las notificaciones de sus propios deals/contactos
+ *  - Registro de prospecto: va a admin + ventas (nunca a vendedores individuales)
+ * @param {string} tipo
+ * @param {object} datos
+ * @param {object|null} perfilOrigen  — perfil que generó la alerta (vendedor)
+ */
+function acumularNotificacionSegmentada(tipo, datos, perfilOrigen) {
+  const id       = 'n' + Date.now() + Math.random().toString(36).slice(2, 6);
+  const notif    = { id, tipo, datos, perfil: perfilOrigen || null, ts: Date.now(), enviada: false };
+
+  // ── Determinar a quién va ──────────────────────────────────────
+  const destinatarios = new Set();
+
+  // 1. Admin y Director (ventas) siempre reciben todo
+  destinatarios.add('admin');
+  destinatarios.add('ventas');
+
+  // 2. Si hay perfil origen y es un vendedor 'venta', agregar su buzón personal
+  if (perfilOrigen && datos._vendedorProfileId) {
+    destinatarios.add('venta_' + datos._vendedorProfileId);
+  }
+
+  // 3. Notificaciones de prospecto nuevo SOLO van a admin + ventas (ya están)
+  //    (si tipo === 'prospecto_nuevo' no hay perfil de vendedor individual)
+
+  // Guardar en cada buzón
+  destinatarios.forEach(dest => {
+    const lista = getNotifDe(dest);
+    lista.unshift(notif);
+    if (lista.length > 100) lista.length = 100;
+    saveNotifDe(dest, lista);
+  });
+
+  // Actualizar badge si el usuario logueado tiene notificaciones nuevas
+  actualizarBadge();
+}
+
+/** Obtener buzón del usuario ACTUALMENTE logueado */
+function getNotifDelUsuarioActual() {
+  const role      = AUTH.role;
+  const profileId = AUTH.profileId;
+  if (role === 'admin')  return getNotifDe('admin');
+  if (role === 'ventas') return getNotifDe('ventas');
+  if (role === 'venta')  return getNotifDe('venta_' + profileId);
+  return [];
+}
+
+/** Guardar buzón del usuario actualmente logueado */
+function saveNotifDelUsuarioActual(lista) {
+  const role      = AUTH.role;
+  const profileId = AUTH.profileId;
+  if (role === 'admin')  saveNotifDe('admin',  lista);
+  if (role === 'ventas') saveNotifDe('ventas', lista);
+  if (role === 'venta')  saveNotifDe('venta_' + profileId, lista);
+}
+
+/* ── DATOS DE VENTA: cada vendedor tiene su propio espacio ─── */
+/**
+ * Clave de datos por perfil de vendedor.
+ * Permite que cada vendedor (venta) tenga sus propios contactos, deals y actividades.
+ */
+function vendedorDataKey(profileId) {
+  return 'node_venta_data_' + profileId;
+}
+
+function getVendedorData(profileId) {
+  try {
+    const raw = localStorage.getItem(vendedorDataKey(profileId));
+    if (!raw) return { contactos: [], deals: [], actividades: [] };
+    return JSON.parse(raw);
+  } catch { return { contactos: [], deals: [], actividades: [] }; }
+}
+
+function saveVendedorData(profileId, data) {
+  localStorage.setItem(vendedorDataKey(profileId), JSON.stringify(data));
+}
 
 /* ── Perfiles por rol (fijos ahora, editables en el futuro desde configuración) ── */
 const DEFAULT_PROFILES = {
@@ -34,6 +142,9 @@ const DEFAULT_PROFILES = {
     { id: 'vendedor1', nombre: 'Vendedor 1', cargo: 'Ejecutivo de Ventas', emoji: '🎯', tel: '', email: '', pwd: 'venta2026' },
     { id: 'vendedor2', nombre: 'Vendedor 2', cargo: 'Ejecutivo de Ventas', emoji: '🎯', tel: '', email: '', pwd: 'venta2026' },
     { id: 'vendedor3', nombre: 'Vendedor 3', cargo: 'Ejecutivo de Ventas', emoji: '🎯', tel: '', email: '', pwd: 'venta2026' },
+  ],
+  prospecto: [
+    { id: 'nuevo', nombre: 'Nuevo cliente', cargo: 'Prospecto', emoji: '🙋', tel: '', email: '', pwd: ''}
   ],
 };
 
@@ -180,6 +291,19 @@ function loginStep1() {
 
 /* ── Login — Paso 2: validar contraseña del perfil y entrar ── */
 function loginStep2() {
+    const selectedCard =
+    document.querySelector('#login-profile-grid .profile-card.active');
+  if (selectedCard?.dataset.role === 'prospecto') {
+    AUTH.isAuth = true;
+    AUTH.role      = 'prospecto';
+    AUTH.profileId = 'nuevo';
+    persistSession('prospecto', 'nuevo');
+    document.getElementById('login-screen').classList.add('hidden');
+    document.getElementById('app').classList.remove('hidden');
+    applyRole();
+    navigate('prospecto-form');
+    return;
+  }
   const profileCard = document.querySelector('#login-profile-grid .profile-card.active');
   const pwdEl  = document.getElementById('login-pwd-step2');
   const errEl  = document.getElementById('login-error-step2');
@@ -206,6 +330,12 @@ function loginStep2() {
   AUTH.isAuth = true; AUTH.role = role; AUTH.profileId = profileId;
   persistSession(role, profileId);
   errEl.classList.add('hidden');
+
+  // ── Cargar datos del perfil autenticado ──────────────────────
+  // CRÍTICO: loadState() DESPUÉS de setear AUTH.role y AUTH.profileId
+  // para que vendedores carguen su store privado, no el global.
+  loadState();
+
   document.getElementById('login-screen').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
 
@@ -255,12 +385,29 @@ function logout() {
 /* ── Aplicar restricciones de rol a la UI ── */
 function applyRole() {
   const role  = AUTH.role;
+
+  // Prospecto: solo ve el formulario, sin sidebar ni topbar
+  const sidebar = document.getElementById('sidebar');
+  const topbar  = document.getElementById('topbar');
+  if (role === 'prospecto') {
+    if (sidebar) sidebar.style.display = 'none';
+    if (topbar)  topbar.style.display  = 'none';
+    document.getElementById('main').style.marginLeft = '0';
+    document.getElementById('main').style.width = '100%';
+  } else {
+    if (sidebar) sidebar.style.display = '';
+    if (topbar)  topbar.style.display  = '';
+    document.getElementById('main').style.marginLeft = '';
+    document.getElementById('main').style.width = '';
+  }
+
   const badge = document.getElementById('role-badge');
 
   const ROLE_META = {
     admin:  { icon: '👑', label: 'Admin',       cls: 'role-admin'  },
     ventas: { icon: '📈', label: 'Dir. Ventas', cls: 'role-ventas' },
     venta:  { icon: '🎯', label: 'Venta NODE',  cls: 'role-venta'  },
+    prospecto: { icon: '🙋', label: 'Prospecto', cls: 'role-venta' },
   };
   const meta = ROLE_META[role] || ROLE_META.ventas;
 
@@ -414,11 +561,12 @@ const ACT_BG     = { whatsapp:'#D1FAE5', llamada:'#EFF6FF', email:'#EEF2FF', reu
 const STORAGE_KEY = 'node_crm_v2';
 
 const PAGE_META = {
-  dashboard:     { title:'Dashboard',    sub:'Resumen de tu pipeline y actividades' },
-  pipeline:      { title:'Pipeline',      sub:'Gestiona tus deals en el Kanban' },
-  contactos:     { title:'Contactos',     sub:'Tu cartera de prospectos y clientes' },
-  actividades:   { title:'Actividades',   sub:'Historial completo de interacciones' },
-  configuracion: { title:'Configuración', sub:'Ajustes de cuenta y exportación de datos' },
+  dashboard:        { title:'Dashboard',              sub:'Resumen de tu pipeline y actividades' },
+  pipeline:         { title:'Pipeline',               sub:'Gestiona tus deals en el Kanban' },
+  contactos:        { title:'Contactos',              sub:'Tu cartera de prospectos y clientes' },
+  actividades:      { title:'Actividades',            sub:'Historial completo de interacciones' },
+  configuracion:    { title:'Configuración',          sub:'Ajustes de cuenta y exportación de datos' },
+  'prospecto-form': { title:'Formulario de Contacto', sub:'Completa tus datos y nos ponemos en contacto contigo' },
 };
 
 /* ── 2. ESTADO ─────────────────────────────────────────────── */
@@ -440,25 +588,51 @@ const S = {
 
 function saveState() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      contactos:   S.contactos,
-      deals:       S.deals,
-      actividades: S.actividades,
-      config:      S.config,
-    }));
+    // Si es un vendedor (venta), guardar en su espacio personal
+    if (AUTH.role === 'venta' && AUTH.profileId) {
+      saveVendedorData(AUTH.profileId, {
+        contactos:   S.contactos,
+        deals:       S.deals,
+        actividades: S.actividades,
+      });
+      // config siempre en el store global
+      const global = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...global, config: S.config }));
+    } else {
+      // Admin, director — store global compartido
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        contactos:   S.contactos,
+        deals:       S.deals,
+        actividades: S.actividades,
+        config:      S.config,
+      }));
+    }
   } catch(e) { console.warn('Storage write error:', e); }
 }
 
 function loadState() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return false;
-    const d = JSON.parse(raw);
-    S.contactos   = d.contactos   || [];
-    S.deals       = d.deals       || [];
-    S.actividades = d.actividades || [];
-    S.config      = Object.assign({}, S.config, d.config || {});
-    return true;
+    if (AUTH.role === 'venta' && AUTH.profileId) {
+      // Vendedor: cargar sus datos privados
+      const vd = getVendedorData(AUTH.profileId);
+      S.contactos   = vd.contactos   || [];
+      S.deals       = vd.deals       || [];
+      S.actividades = vd.actividades || [];
+      // Config del global
+      const global = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      S.config = Object.assign({}, S.config, global.config || {});
+      return true;
+    } else {
+      // Admin, director — store global compartido
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return false;
+      const d = JSON.parse(raw);
+      S.contactos   = d.contactos   || [];
+      S.deals       = d.deals       || [];
+      S.actividades = d.actividades || [];
+      S.config      = Object.assign({}, S.config, d.config || {});
+      return true;
+    }
   } catch(e) { return false; }
 }
 
@@ -467,6 +641,10 @@ function loadState() {
 function seedData() {
   const now = Date.now();
   const ago = (days) => now - days * 86_400_000;
+
+  // seedData solo aplica a admin/ventas (datos globales compartidos)
+  // Los vendedores individuales arrancan con datos vacíos
+  if (AUTH.role === 'venta') return;
 
   S.contactos = [
     { id:'c1', nombre:'Ana García',        empresa:'Fotografía AG',          whatsapp:'5512345671', email:'ana@fotografiaag.mx',    fuente:'Instagram', monto:8000,  notas:'Fotógrafa de bodas, quiere presencia profesional en web.', creadoEn:ago(15), actualizadoEn:ago(2)  },
@@ -479,19 +657,20 @@ function seedData() {
     { id:'c8', nombre:'Luis Vega',         empresa:'Vega Construcción',      whatsapp:'5589012348', email:'luis@vegaconstruccion.mx', fuente:'Referido',  monto:8500,  notas:'Constructor, cotizaciones en PDF manual sin proceso.',       creadoEn:ago(12), actualizadoEn:ago(4)  },
   ];
 
+  // deals con vendedorId asignado (distribuido entre vendedores de ejemplo)
   S.deals = [
-    { id:'d1', titulo:'Landing Page Pro',         contactoId:'c1', valor:8000,  etapa:'propuesta_env', fechaLimite:'2026-06-20', proximaAccion:'Enviar contrato firmado',      notas:'',                           creadoEn:ago(14), actualizadoEn:ago(2)  },
-    { id:'d2', titulo:'Cotizador Digital Pro',    contactoId:'c2', valor:5500,  etapa:'diag_agendado', fechaLimite:'2026-06-10', proximaAccion:'Demo miércoles 10am',           notas:'',                           creadoEn:ago(18), actualizadoEn:ago(5)  },
-    { id:'d3', titulo:'Bundle Vende Más (B2)',    contactoId:'c3', valor:17200, etapa:'negociacion',   fechaLimite:'2026-06-08', proximaAccion:'Revisar términos de pago',      notas:'Quiere pago en 2 parcialidades.', creadoEn:ago(9),  actualizadoEn:ago(1)  },
-    { id:'d4', titulo:'Landing Page Básica',      contactoId:'c4', valor:4500,  etapa:'prospecto_id',  fechaLimite:'2026-07-01', proximaAccion:'Enviar mensaje personalizado',  notas:'',                           creadoEn:ago(7),  actualizadoEn:ago(3)  },
-    { id:'d5', titulo:'NODE CRM P6',              contactoId:'c5', valor:12500, etapa:'contacto_env',  fechaLimite:'2026-06-25', proximaAccion:'Agendar diagnóstico',           notas:'',                           creadoEn:ago(28), actualizadoEn:ago(6)  },
-    { id:'d6', titulo:'Facturador CFDI Básico',   contactoId:'c6', valor:6500,  etapa:'onboarding',    fechaLimite:'2026-05-30', proximaAccion:'D+3: ofrecer mantenimiento R1', notas:'Anticipo 50% recibido.',    creadoEn:ago(38), actualizadoEn:ago(2)  },
-    { id:'d7', titulo:'Landing Page Pro',         contactoId:'c7', valor:8000,  etapa:'perdido',       fechaLimite:'2026-05-15', proximaAccion:'—',                            notas:'Eligió agencia local más barata.', creadoEn:ago(23), actualizadoEn:ago(10) },
-    { id:'d8', titulo:'Bundle STARTER (B1)',      contactoId:'c8', valor:8500,  etapa:'propuesta_env', fechaLimite:'2026-06-18', proximaAccion:'Follow-up mañana temprano',    notas:'',                           creadoEn:ago(11), actualizadoEn:ago(4)  },
-    { id:'d9', titulo:'Cotizador + Landing Pro',  contactoId:'c1', valor:14000, etapa:'conv_activa',   fechaLimite:'2026-07-10', proximaAccion:'Agendar diagnóstico esta semana', notas:'Segunda oportunidad con Ana.', creadoEn:ago(3), actualizadoEn:ago(1)  },
-    { id:'d10',titulo:'Mantenimiento Anual',      contactoId:'c6', valor:14400, etapa:'mantenimiento', fechaLimite:'2027-05-30', proximaAccion:'Renovar en 30 días',           notas:'R2 activo desde junio.',     creadoEn:ago(35), actualizadoEn:ago(0)  },
-    { id:'d11',titulo:'Bundle PRO Upsell',        contactoId:'c3', valor:14500, etapa:'upsell',        fechaLimite:'2026-07-15', proximaAccion:'Proponer bundle PRO en llamada', notas:'NPS 9. Lista para crecer.', creadoEn:ago(5),  actualizadoEn:ago(0)  },
-    { id:'d12',titulo:'Opor. Calificada — POS',   contactoId:'c2', valor:9500,  etapa:'opor_cal',      fechaLimite:'2026-06-30', proximaAccion:'Enviar propuesta P7 + POS',    notas:'MEDDIC 5/6.',               creadoEn:ago(4),  actualizadoEn:ago(1)  },
+    { id:'d1',  titulo:'Landing Page Pro',         contactoId:'c1', valor:8000,  etapa:'propuesta_env', fechaLimite:'2026-06-20', proximaAccion:'Enviar contrato firmado',         notas:'',                               vendedorId:'vendedor1', creadoEn:ago(14), actualizadoEn:ago(2)  },
+    { id:'d2',  titulo:'Cotizador Digital Pro',    contactoId:'c2', valor:5500,  etapa:'diag_agendado', fechaLimite:'2026-06-10', proximaAccion:'Demo miércoles 10am',              notas:'',                               vendedorId:'vendedor1', creadoEn:ago(18), actualizadoEn:ago(5)  },
+    { id:'d3',  titulo:'Bundle Vende Más (B2)',    contactoId:'c3', valor:17200, etapa:'negociacion',   fechaLimite:'2026-06-08', proximaAccion:'Revisar términos de pago',         notas:'Quiere pago en 2 parcialidades.', vendedorId:'vendedor2', creadoEn:ago(9),  actualizadoEn:ago(1)  },
+    { id:'d4',  titulo:'Landing Page Básica',      contactoId:'c4', valor:4500,  etapa:'prospecto_id',  fechaLimite:'2026-07-01', proximaAccion:'Enviar mensaje personalizado',     notas:'',                               vendedorId:'vendedor2', creadoEn:ago(7),  actualizadoEn:ago(3)  },
+    { id:'d5',  titulo:'NODE CRM P6',              contactoId:'c5', valor:12500, etapa:'contacto_env',  fechaLimite:'2026-06-25', proximaAccion:'Agendar diagnóstico',              notas:'',                               vendedorId:'vendedor3', creadoEn:ago(28), actualizadoEn:ago(6)  },
+    { id:'d6',  titulo:'Facturador CFDI Básico',   contactoId:'c6', valor:6500,  etapa:'onboarding',    fechaLimite:'2026-05-30', proximaAccion:'D+3: ofrecer mantenimiento R1',    notas:'Anticipo 50% recibido.',         vendedorId:'vendedor3', creadoEn:ago(38), actualizadoEn:ago(2)  },
+    { id:'d7',  titulo:'Landing Page Pro',         contactoId:'c7', valor:8000,  etapa:'perdido',       fechaLimite:'2026-05-15', proximaAccion:'—',                               notas:'Eligió agencia local más barata.', vendedorId:'vendedor1', creadoEn:ago(23), actualizadoEn:ago(10) },
+    { id:'d8',  titulo:'Bundle STARTER (B1)',      contactoId:'c8', valor:8500,  etapa:'propuesta_env', fechaLimite:'2026-06-18', proximaAccion:'Follow-up mañana temprano',        notas:'',                               vendedorId:'vendedor2', creadoEn:ago(11), actualizadoEn:ago(4)  },
+    { id:'d9',  titulo:'Cotizador + Landing Pro',  contactoId:'c1', valor:14000, etapa:'conv_activa',   fechaLimite:'2026-07-10', proximaAccion:'Agendar diagnóstico esta semana',  notas:'Segunda oportunidad con Ana.',   vendedorId:'vendedor1', creadoEn:ago(3),  actualizadoEn:ago(1)  },
+    { id:'d10', titulo:'Mantenimiento Anual',      contactoId:'c6', valor:14400, etapa:'mantenimiento', fechaLimite:'2027-05-30', proximaAccion:'Renovar en 30 días',               notas:'R2 activo desde junio.',         vendedorId:'vendedor3', creadoEn:ago(35), actualizadoEn:ago(0)  },
+    { id:'d11', titulo:'Bundle PRO Upsell',        contactoId:'c3', valor:14500, etapa:'upsell',        fechaLimite:'2026-07-15', proximaAccion:'Proponer bundle PRO en llamada',   notas:'NPS 9. Lista para crecer.',      vendedorId:'vendedor2', creadoEn:ago(5),  actualizadoEn:ago(0)  },
+    { id:'d12', titulo:'Opor. Calificada — POS',   contactoId:'c2', valor:9500,  etapa:'opor_cal',      fechaLimite:'2026-06-30', proximaAccion:'Enviar propuesta P7 + POS',        notas:'MEDDIC 5/6.',                    vendedorId:'vendedor3', creadoEn:ago(4),  actualizadoEn:ago(1)  },
   ];
 S.deals.forEach(d => {
   if (['ganado', 'onboarding'].includes(d.etapa) && !d.onboardingStartedAt) {
@@ -587,7 +766,17 @@ function navigate(view) {
   void content.offsetWidth;
   content.classList.add('view-enter');
 
-  const views = { dashboard, pipeline, contactos, actividades, configuracion };
+  // Enrutar según rol: admin y ventas usan vistas consolidadas
+  const isAdmin = AUTH.role === 'admin' || AUTH.role === 'ventas';
+
+  const views = {
+    dashboard:        isAdmin ? dashboardAdmin   : dashboard,
+    pipeline:         isAdmin ? pipelineAdmin    : pipeline,
+    contactos:        isAdmin ? contactosAdmin   : contactos,
+    actividades:      isAdmin ? actividadesAdmin : actividades,
+    configuracion,
+    'prospecto-form': prospectoForm,
+  };
   views[view]?.();
 }
 
@@ -1419,8 +1608,11 @@ function saveContacto() {
   }
 
   saveState(); closeAllModals();
-  if (S.view === 'contactos') contactos();
-  else if (S.view === 'dashboard') dashboard();
+
+  // Re-renderizar con la función correcta para el rol activo
+  const isAdmin = AUTH.role === 'admin' || AUTH.role === 'ventas';
+  if (S.view === 'contactos')  { isAdmin ? contactosAdmin()  : contactos(); }
+  else if (S.view === 'dashboard') { isAdmin ? dashboardAdmin() : dashboard(); }
 }
 
 function deleteContacto(id) {
@@ -1430,7 +1622,9 @@ function deleteContacto(id) {
   S.deals       = S.deals.filter(d => d.contactoId !== id);
   S.actividades = S.actividades.filter(a => a.contactoId !== id);
   saveState(); closeAllModals();
-  if (S.view === 'contactos') contactos();
+
+  const _isAdmin = AUTH.role === 'admin' || AUTH.role === 'ventas';
+  if (S.view === 'contactos') { _isAdmin ? contactosAdmin() : contactos(); }
   else navigate(S.view);
   toast('Eliminado', c.nombre, 'warn');
 }
@@ -1453,8 +1647,9 @@ function marcarRealizado(id) {
   c.actualizadoEn = now;
 
   saveState();
-  if (S.view === 'contactos') contactos();
-  else if (S.view === 'actividades') actividades();
+  const _isAdminMR = AUTH.role === 'admin' || AUTH.role === 'ventas';
+  if (S.view === 'contactos')  { _isAdminMR ? contactosAdmin()  : contactos();   }
+  else if (S.view === 'actividades') { _isAdminMR ? actividadesAdmin() : actividades(); }
   toast('Realizado', c.nombre, 'success');
 }
 
@@ -1514,25 +1709,36 @@ function saveDeal() {
     toast('Deal actualizado', titulo, 'success');
 
     saveState(); closeAllModals();
-    if      (S.view === 'pipeline')    pipeline();
-    else if (S.view === 'dashboard')   dashboard();
-    else if (S.view === 'actividades') actividades();
+    const _isAdminSD = AUTH.role === 'admin' || AUTH.role === 'ventas';
+    if      (S.view === 'pipeline')    { _isAdminSD ? pipelineAdmin()    : pipeline();    }
+    else if (S.view === 'dashboard')   { _isAdminSD ? dashboardAdmin()   : dashboard();   }
+    else if (S.view === 'actividades') { _isAdminSD ? actividadesAdmin() : actividades(); }
 
   } else {
     // ── Nuevo deal: guardar + registrar actividad automática ──
     const newDealId = 'd' + uid();
+    // Asignar vendedorId al perfil activo si es vendedor
+    if (AUTH.role === 'venta' && AUTH.profileId) {
+      data.vendedorId = AUTH.profileId;
+    }
     S.deals.push({ id: newDealId, creadoEn: now, ...data });
     // ── Notificación deal nuevo → acumular en panel + enviar por WA ──
     const _perfilActivo = getProfileById(AUTH.role, AUTH.profileId);
     const _datosDeal = {
-      titulo:        titulo,
-      contacto:      data.contacto || getContacto(data.contactoId)?.nombre || 'Sin contacto',
-      valor:         data.valor ? fmtMXN(data.valor) : 'No definido',
-      proximaAccion: data.proximaAccion || 'Sin definir',
-      vendedor:      _perfilActivo?.nombre || 'Sin asignar',
+      titulo:               titulo,
+      contacto:             data.contacto || getContacto(data.contactoId)?.nombre || 'Sin contacto',
+      valor:                data.valor ? fmtMXN(data.valor) : 'No definido',
+      proximaAccion:        data.proximaAccion || 'Sin definir',
+      vendedor:             _perfilActivo?.nombre || 'Sin asignar',
+      _vendedorProfileId:   AUTH.role === 'venta' ? AUTH.profileId : null,
     };
-    acumularNotificacion('deal_nuevo', _datosDeal, _perfilActivo);
-    notificarWhatsApp('deal_nuevo', _datosDeal, 'admin');
+    acumularNotificacionSegmentada('deal_nuevo', _datosDeal, _perfilActivo);
+    // Solo abrir WhatsApp si quien crea el deal es admin o director de ventas,
+    // nunca cuando es un vendedor (role === 'venta')
+    if (AUTH.role !== 'venta') {
+      notificarWhatsApp('deal_nuevo', _datosDeal, 'admin');
+      notificarWhatsApp('deal_nuevo', _datosDeal, 'ventas');
+    }
 
     const etapaLabel = getEtapa(data.etapa).label;
     const partes = [
@@ -1559,9 +1765,10 @@ function saveDeal() {
     }
 
     saveState(); closeAllModals();
-    if      (S.view === 'pipeline')    { pipeline();    setTimeout(() => openDealDrawer(newDealId), 120); }
-    else if (S.view === 'dashboard')   dashboard();
-    else if (S.view === 'actividades') actividades();
+    const _isAdminND = AUTH.role === 'admin' || AUTH.role === 'ventas';
+    if      (S.view === 'pipeline')    { _isAdminND ? pipelineAdmin()  : (pipeline(), setTimeout(() => openDealDrawer(newDealId), 120)); }
+    else if (S.view === 'dashboard')   { _isAdminND ? dashboardAdmin() : dashboard(); }
+    else if (S.view === 'actividades') { _isAdminND ? actividadesAdmin() : actividades(); }
 
     toast('Deal creado', titulo, 'success');
   }
@@ -1573,7 +1780,8 @@ function deleteDeal(id) {
   if (!d || !confirm(`¿Eliminar el deal "${d.titulo}"?`)) return;
   S.deals = S.deals.filter(x => x.id !== id);
   saveState(); closeAllModals();
-  if (S.view === 'pipeline') pipeline();
+  const _isAdminDD = AUTH.role === 'admin' || AUTH.role === 'ventas';
+  if (S.view === 'pipeline') { _isAdminDD ? pipelineAdmin() : pipeline(); }
   toast('Eliminado', d.titulo, 'warn');
 }
 
@@ -1604,14 +1812,18 @@ function saveActividad() {
   }
 
   saveState(); closeAllModals();
-  if (S.view === 'actividades') actividades();
-  else if (S.view === 'dashboard') dashboard();
+  const _isAdminSA = AUTH.role === 'admin' || AUTH.role === 'ventas';
+  if (S.view === 'actividades')  { _isAdminSA ? actividadesAdmin() : actividades();  }
+  else if (S.view === 'dashboard') { _isAdminSA ? dashboardAdmin()  : dashboard();    }
+  else if (S.view === 'pipeline')  { _isAdminSA ? pipelineAdmin()   : pipeline();     }
   toast('Actividad registrada', ACT_LABELS[act.tipo], 'success');
 }
 
 function deleteActividad(id) {
   S.actividades = S.actividades.filter(a => a.id !== id);
-  saveState(); actividades();
+  saveState();
+  const _isAdminDA = AUTH.role === 'admin' || AUTH.role === 'ventas';
+  _isAdminDA ? actividadesAdmin() : actividades();
   toast('Eliminada', '', 'warn');
 }
 
@@ -2003,11 +2215,14 @@ function init() {
 
   setupLoginScreen();
 
-  const hasData = loadState();
-  if (!hasData) seedData();
-
   // Restaurar sesión activa (recarga de pestaña)
   if (restoreSession()) {
+    // Con sesión activa: cargar datos del rol correcto DESPUÉS de conocer el rol
+    const hasData = loadState();
+    if (!hasData && (AUTH.role === 'admin' || AUTH.role === 'ventas')) {
+      seedData();
+    }
+
     document.getElementById('login-screen').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
     // Asegurar que el login quede en paso 1 por si se recarga
@@ -2030,6 +2245,16 @@ function init() {
     setInterval(checkNotificaciones, 30 * 60 * 1000);
 
   } else {
+    // Sin sesión: precargar datos globales de ejemplo si no existen
+    // Los vendedores (venta) NO precargan nada — sus datos se cargan en loginStep2
+    const globalRaw = localStorage.getItem(STORAGE_KEY);
+    if (!globalRaw) {
+      // Seed de datos de muestra para admin/ventas (seedData ignora role=venta por diseño)
+      seedData();
+      // Guardar sin contaminar S — limpiar S después
+      S.contactos = []; S.deals = []; S.actividades = [];
+    }
+
     // Sin sesión → mostrar login
     document.getElementById('login-screen').classList.remove('hidden');
     document.getElementById('app').classList.add('hidden');
@@ -2073,6 +2298,17 @@ Un cliente solicitó un servicio:
 • 👤 Generado por: ${datos.vendedor || 'Sin asignar'}
 
 Entra al CRM para dar seguimiento.`,
+
+    // Evento 0 — Prospecto nuevo desde formulario web
+    prospecto_nuevo: `🙋 *${empresa}*
+📅 ${hoy}
+
+¡Nuevo prospecto registrado desde el formulario web!
+• Nombre: ${datos.contacto}
+• Interés: ${datos.proximaAccion}
+• 📥 Fuente: Formulario web (auto-registro)
+
+Asigna a un vendedor y da seguimiento.`,
 
     // Evento 2 — Reunión próxima (fecha límite cercana)
     reunion_proxima: `📅 *${empresa}*
@@ -2122,37 +2358,23 @@ function notificarWhatsApp(tipo, datos, rol = null){
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   PANEL DE NOTIFICACIONES PENDIENTES
+   PANEL DE NOTIFICACIONES PENDIENTES (segmentado por rol/perfil)
    ═══════════════════════════════════════════════════════════════ */
 
-const NOTIF_STORE_KEY = 'node_notif_pendientes';
+/* NOTA: getNotifDe / saveNotifDe / acumularNotificacionSegmentada
+   están definidas arriba junto a ROLE_VIEWS */
 
-/* ── Leer y guardar notificaciones pendientes ── */
+/* ── Helpers de compatibilidad para el panel ── */
 function getNotifPendientes() {
-  try {
-    return JSON.parse(localStorage.getItem(NOTIF_STORE_KEY) || '[]');
-  } catch { return []; }
+  return getNotifDelUsuarioActual();
 }
 function saveNotifPendientes(lista) {
-  localStorage.setItem(NOTIF_STORE_KEY, JSON.stringify(lista));
+  saveNotifDelUsuarioActual(lista);
 }
 
-/* ── Agregar una notificación al panel (no la envía, la acumula) ── */
+/** @deprecated — usar acumularNotificacionSegmentada */
 function acumularNotificacion(tipo, datos, perfilOrigen) {
-  const lista = getNotifPendientes();
-  const id    = 'n' + Date.now() + Math.random().toString(36).slice(2, 6);
-  lista.unshift({
-    id,
-    tipo,       // 'reunion_proxima' | 'sin_actividad' | 'deal_nuevo'
-    datos,      // datos del deal
-    perfil: perfilOrigen || null,   // perfil que generó la alerta
-    ts: Date.now(),
-    enviada: false,
-  });
-  // Máximo 50 notificaciones en el panel
-  if (lista.length > 50) lista.length = 50;
-  saveNotifPendientes(lista);
-  actualizarBadge();
+  acumularNotificacionSegmentada(tipo, datos, perfilOrigen);
 }
 
 /* ── Actualizar el badge contador de la campana ── */
@@ -2188,10 +2410,29 @@ function renderNotifPanel() {
   emptyEl?.classList.add('hidden');
 
   const TIPO_META = {
-    reunion_proxima: { label: '📅 Reunión próxima', cls: 'reunion' },
-    sin_actividad:   { label: '😴 Sin actividad',   cls: 'sinactividad' },
-    deal_nuevo:      { label: '🆕 Deal nuevo',       cls: 'deal_nuevo' },
+    reunion_proxima: { label: '📅 Reunión próxima',       cls: 'reunion'       },
+    sin_actividad:   { label: '😴 Sin actividad',          cls: 'sinactividad'  },
+    deal_nuevo:      { label: '🆕 Deal nuevo',             cls: 'deal_nuevo'    },
+    prospecto_nuevo: { label: '🙋 Nuevo prospecto',        cls: 'deal_nuevo'    },
   };
+
+  // Encabezado del panel según el rol
+  const ROLE_NOTIF_LABELS = {
+    admin:  '👑 Admin — Todas las notificaciones',
+    ventas: '📈 Director — Todas las notificaciones',
+    venta:  '🎯 Mis notificaciones',
+  };
+  const panelTitleEl = document.querySelector('.notif-panel-title');
+  if (panelTitleEl) {
+    const roleLabel = ROLE_NOTIF_LABELS[AUTH.role] || 'Notificaciones';
+    const subEl = panelTitleEl.querySelector('.notif-role-sub') || (() => {
+      const s = document.createElement('span');
+      s.className = 'notif-role-sub';
+      panelTitleEl.appendChild(s);
+      return s;
+    })();
+    subEl.textContent = ' · ' + roleLabel;
+  }
 
   listEl.innerHTML = pendientes.map(n => {
     const meta    = TIPO_META[n.tipo] || { label: '📌 Alerta', cls: 'reunion' };
@@ -2206,7 +2447,17 @@ function renderNotifPanel() {
       detalle = `${n.datos.diasSinActividad} días sin actividad<br>Última acción: ${escapeHTML(n.datos.ultimaAccion || '—')}`;
     } else if (n.tipo === 'deal_nuevo') {
       detalle = `Valor: ${n.datos.valor}<br>Acción: ${escapeHTML(n.datos.proximaAccion || '—')}`;
+    } else if (n.tipo === 'prospecto_nuevo') {
+      detalle = `Fuente: Formulario web<br>Interés: ${escapeHTML(n.datos.proximaAccion || '—')}`;
     }
+
+    // Vendedor asignado (si aplica — visible en admin/ventas)
+    const vendedorHTML = (AUTH.role === 'admin' || AUTH.role === 'ventas') && n.datos?.vendedor
+      ? `<div class="notif-card-vendedor">
+           <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+           Vendedor: <strong>${escapeHTML(n.datos.vendedor)}</strong>
+         </div>`
+      : '';
 
     // Card del perfil origen
     const perfilHTML = perfil ? `
@@ -2225,10 +2476,11 @@ function renderNotifPanel() {
           <span class="notif-card-time">${tiempo}</span>
         </div>
         <div class="notif-card-body">
-          <div class="notif-card-deal">${escapeHTML(n.datos.titulo || '—')}</div>
+          <div class="notif-card-deal">${escapeHTML(n.datos.titulo || n.datos.contacto || '—')}</div>
           <div class="notif-card-cliente">👤 ${escapeHTML(n.datos.contacto || '—')}</div>
           <div class="notif-card-detail">${detalle}</div>
         </div>
+        ${vendedorHTML}
         ${perfilHTML}
         <div class="notif-card-footer">
           <button class="notif-btn-send" onclick="enviarNotifWA('${n.id}')">
@@ -2272,29 +2524,37 @@ function enviarNotifWA(notifId) {
 
   const mensaje = construirMensajeWa(notif.tipo, {
     ...notif.datos,
-    vendedor: notif.perfil?.nombre || 'Sin asignar',
+    vendedor: notif.perfil?.nombre || notif.datos?.vendedor || 'Sin asignar',
   });
 
-  // Obtener perfiles admin con número
-  const perfiles = getProfiles()['admin'] || [];
-  const conTel   = perfiles.filter(p => p.tel);
+  // Determinar destinatarios WA según el rol del usuario activo
+  let perfilesWA = [];
+  if (AUTH.role === 'admin') {
+    // Admin envía a todos los admins con número
+    perfilesWA = (getProfiles()['admin'] || []).filter(p => p.tel);
+  } else if (AUTH.role === 'ventas') {
+    // Director de ventas envía a todos los directores con número
+    perfilesWA = (getProfiles()['ventas'] || []).filter(p => p.tel);
+  } else if (AUTH.role === 'venta') {
+    // Vendedor individual envía a sí mismo
+    const propio = getProfileById('venta', AUTH.profileId);
+    if (propio?.tel) perfilesWA = [propio];
+  }
 
-  if (conTel.length === 0) {
-    toast('Sin número', 'Agrega un teléfono a los perfiles admin para enviar notificaciones.', 'warn');
+  if (perfilesWA.length === 0) {
+    toast('Sin número', 'Agrega un teléfono a tu perfil para enviar notificaciones.', 'warn');
     return;
   }
 
-  // Abrir WhatsApp para cada perfil admin con número
-  conTel.forEach((p, i) => {
+  perfilesWA.forEach((p, i) => {
     setTimeout(() => enviarWhatsApp(p.tel, mensaje), i * 600);
   });
 
-  // Marcar como enviada
+  // Marcar como enviada en el buzón del usuario activo
   notif.enviada = true;
   saveNotifPendientes(lista);
   actualizarBadge();
 
-  // Actualizar la card en el panel con animación
   const card = document.querySelector(`.notif-card[data-notif-id="${notifId}"]`);
   if (card) {
     card.style.opacity = '0.4';
@@ -2302,20 +2562,29 @@ function enviarNotifWA(notifId) {
     setTimeout(() => { renderNotifPanel(); actualizarBadge(); }, 500);
   }
 
-  toast('WhatsApp abierto', `Enviando a ${conTel.length} perfil(es) admin.`, 'success');
+  toast('WhatsApp abierto', `Enviando a ${perfilesWA.length} número(s).`, 'success');
 }
 
 /* ── Enviar TODAS las notificaciones pendientes ── */
 function enviarTodasNotif() {
-  const lista     = getNotifPendientes().filter(n => !n.enviada);
+  const lista = getNotifPendientes().filter(n => !n.enviada);
   if (lista.length === 0) {
     toast('Sin pendientes', 'No hay notificaciones por enviar.', 'info');
     return;
   }
 
-  const perfiles = getProfiles()['admin']?.filter(p => p.tel) || [];
-  if (perfiles.length === 0) {
-    toast('Sin número', 'Agrega un teléfono a los perfiles admin.', 'warn');
+  let perfilesWA = [];
+  if (AUTH.role === 'admin') {
+    perfilesWA = (getProfiles()['admin'] || []).filter(p => p.tel);
+  } else if (AUTH.role === 'ventas') {
+    perfilesWA = (getProfiles()['ventas'] || []).filter(p => p.tel);
+  } else if (AUTH.role === 'venta') {
+    const propio = getProfileById('venta', AUTH.profileId);
+    if (propio?.tel) perfilesWA = [propio];
+  }
+
+  if (perfilesWA.length === 0) {
+    toast('Sin número', 'Agrega un teléfono a tu perfil para enviar notificaciones.', 'warn');
     return;
   }
 
@@ -2323,18 +2592,18 @@ function enviarTodasNotif() {
   lista.forEach(notif => {
     const mensaje = construirMensajeWa(notif.tipo, {
       ...notif.datos,
-      vendedor: notif.perfil?.nombre || 'Sin asignar',
+      vendedor: notif.perfil?.nombre || notif.datos?.vendedor || 'Sin asignar',
     });
-    perfiles.forEach(p => {
+    perfilesWA.forEach(p => {
       setTimeout(() => enviarWhatsApp(p.tel, mensaje), delay);
       delay += 700;
     });
-    notif.enviada = true;
   });
 
-  saveNotifPendientes(getNotifPendientes()); // no releer — ya mutamos
+  // Marcar todas como enviadas
   const all = getNotifPendientes();
-  all.forEach(n => { if (lista.find(x => x.id === n.id)) n.enviada = true; });
+  const ids = new Set(lista.map(n => n.id));
+  all.forEach(n => { if (ids.has(n.id)) n.enviada = true; });
   saveNotifPendientes(all);
 
   setTimeout(() => { renderNotifPanel(); actualizarBadge(); }, 400);
@@ -2378,6 +2647,7 @@ document.addEventListener('DOMContentLoaded', init);
 function abrirModalPerfil() {
   const role      = AUTH.role;
   const profileId = AUTH.profileId;
+  if (role === 'prospecto') return;
   const profile   = getProfileById(role, profileId);
   if (!profile) return;
 
@@ -2433,58 +2703,813 @@ function guardarMiPerfil() {
  *  2. El deal lleva 3+ días sin actividad (sin_actividad)
  * Se llama al cargar el CRM y cada 30 minutos.
  */
+/**
+ * Revisa todos los deals activos y dispara notificaciones WA si:
+ *  1. La fecha límite es en 1 o 2 días (reunión próxima)
+ *  2. El deal lleva 3+ días sin actividad (sin_actividad)
+ * Segmentación:
+ *  - Admin y Director ven TODAS las alertas
+ *  - Cada vendedor (venta) solo ve alertas de SUS deals
+ * Se llama al cargar el CRM y cada 30 minutos.
+ */
 function checkNotificaciones() {
   const ahora    = Date.now();
   const MS_DIA   = 86_400_000;
   const etapasIgnorar = ['ganado', 'perdido'];
 
-  // Cargar registro de notificaciones ya enviadas hoy
-  // para no mandar el mismo aviso 2 veces en el mismo día
-  const HOY_KEY  = 'node_notif_' + new Date().toISOString().slice(0, 10);
+  // Clave única por día para evitar duplicados
+  const HOY_KEY  = 'node_notif_check_' + new Date().toISOString().slice(0, 10);
   let   enviados = JSON.parse(localStorage.getItem(HOY_KEY) || '[]');
 
+  // Determinar qué deals revisar:
+  // - admin/ventas: todos los deals globales (S.deals ya los tiene)
+  // - venta: solo deals de S.deals (que son sus propios)
   S.deals.forEach(deal => {
     if (etapasIgnorar.includes(deal.etapa)) return;
 
-    const contacto = S.contactos.find(c => c.id === deal.contactoId);
+    const contacto    = S.contactos.find(c => c.id === deal.contactoId);
     const nomContacto = contacto?.nombre || 'Sin contacto';
 
-    // ── Detector 1: Reunión próxima (fecha límite en 1 o 2 días) ──
+    // Perfil del vendedor dueño del deal
+    const vendedorProfileId = deal.vendedorId || null;
+    const perfilVendedor    = vendedorProfileId
+      ? getProfileById('venta', vendedorProfileId)
+      : null;
+
+    // El perfil "origen" que aparecerá en la notificación
+    const perfilOrigen = perfilVendedor || (AUTH.profileId ? getProfileById(AUTH.role, AUTH.profileId) : null);
+
+    // ── Detector 1: Reunión próxima ──────────────────────────
     if (deal.fechaLimite) {
-      const limite      = new Date(deal.fechaLimite).getTime();
+      const limite        = new Date(deal.fechaLimite).getTime();
       const diasRestantes = Math.ceil((limite - ahora) / MS_DIA);
-      const keyReunion  = `reunion_${deal.id}_${diasRestantes}d`;
+      const keyReunion    = `reunion_${deal.id}_${diasRestantes}d`;
 
       if ((diasRestantes === 1 || diasRestantes === 2) && !enviados.includes(keyReunion)) {
-        const perfilOrigen = AUTH.profileId ? getProfileById(AUTH.role, AUTH.profileId) : null;
-        acumularNotificacion('reunion_proxima', {
-          titulo:         deal.titulo,
-          contacto:       nomContacto,
-          fechaLimite:    fmtDate(deal.fechaLimite),
-          diasRestantes:  diasRestantes,
-          proximaAccion:  deal.proximaAccion || 'Sin definir',
-        }, perfilOrigen);
+        const datos = {
+          titulo:              deal.titulo,
+          contacto:            nomContacto,
+          fechaLimite:         fmtDate(deal.fechaLimite),
+          diasRestantes,
+          proximaAccion:       deal.proximaAccion || 'Sin definir',
+          vendedor:            perfilOrigen?.nombre || 'Sin asignar',
+          _vendedorProfileId:  vendedorProfileId,
+        };
+        acumularNotificacionSegmentada('reunion_proxima', datos, perfilOrigen);
         enviados.push(keyReunion);
       }
     }
 
-    // ── Detector 2: Deal sin actividad (3+ días) ──
-    const ultimaAct     = deal.actualizadoEn || deal.creadoEn;
-    const diasSinAct    = Math.floor((ahora - ultimaAct) / MS_DIA);
-    const keySinAct     = `sinact_${deal.id}_${Math.floor(diasSinAct / 3)}`; // una vez cada 3 días
+    // ── Detector 2: Deal sin actividad (3+ días) ────────────
+    const ultimaAct  = deal.actualizadoEn || deal.creadoEn;
+    const diasSinAct = Math.floor((ahora - ultimaAct) / MS_DIA);
+    const keySinAct  = `sinact_${deal.id}_${Math.floor(diasSinAct / 3)}`;
 
     if (diasSinAct >= 3 && !enviados.includes(keySinAct)) {
-      const perfilOrigen = AUTH.profileId ? getProfileById(AUTH.role, AUTH.profileId) : null;
-      acumularNotificacion('sin_actividad', {
-        titulo:           deal.titulo,
-        contacto:         nomContacto,
-        diasSinActividad: diasSinAct,
-        ultimaAccion:     deal.proximaAccion || 'Sin registrar',
-      }, perfilOrigen);
+      const datos = {
+        titulo:             deal.titulo,
+        contacto:           nomContacto,
+        diasSinActividad:   diasSinAct,
+        ultimaAccion:       deal.proximaAccion || 'Sin registrar',
+        vendedor:           perfilOrigen?.nombre || 'Sin asignar',
+        _vendedorProfileId: vendedorProfileId,
+      };
+      acumularNotificacionSegmentada('sin_actividad', datos, perfilOrigen);
       enviados.push(keySinAct);
     }
   });
 
-  // Guardar registro del día
+  // Si es admin/ventas, también revisar deals de TODOS los vendedores
+  // (sus stores privados) para tener visibilidad completa
+  if (AUTH.role === 'admin' || AUTH.role === 'ventas') {
+    const todosVendedores = getProfiles()['venta'] || [];
+    todosVendedores.forEach(vendedor => {
+      const vd = getVendedorData(vendedor.id);
+      (vd.deals || []).forEach(deal => {
+        if (etapasIgnorar.includes(deal.etapa)) return;
+        const contactos   = vd.contactos || [];
+        const contacto    = contactos.find(c => c.id === deal.contactoId);
+        const nomContacto = contacto?.nombre || 'Sin contacto';
+        const perfilV     = vendedor;
+
+        if (deal.fechaLimite) {
+          const limite        = new Date(deal.fechaLimite).getTime();
+          const diasRestantes = Math.ceil((limite - ahora) / MS_DIA);
+          const keyR          = `reunion_vd_${vendedor.id}_${deal.id}_${diasRestantes}d`;
+          if ((diasRestantes === 1 || diasRestantes === 2) && !enviados.includes(keyR)) {
+            acumularNotificacionSegmentada('reunion_proxima', {
+              titulo:              deal.titulo,
+              contacto:            nomContacto,
+              fechaLimite:         fmtDate(deal.fechaLimite),
+              diasRestantes,
+              proximaAccion:       deal.proximaAccion || 'Sin definir',
+              vendedor:            perfilV.nombre,
+              _vendedorProfileId:  vendedor.id,
+            }, perfilV);
+            enviados.push(keyR);
+          }
+        }
+
+        const ultimaAct  = deal.actualizadoEn || deal.creadoEn;
+        const diasSinAct = Math.floor((ahora - ultimaAct) / MS_DIA);
+        const keyS       = `sinact_vd_${vendedor.id}_${deal.id}_${Math.floor(diasSinAct / 3)}`;
+        if (diasSinAct >= 3 && !enviados.includes(keyS)) {
+          acumularNotificacionSegmentada('sin_actividad', {
+            titulo:             deal.titulo,
+            contacto:           nomContacto,
+            diasSinActividad:   diasSinAct,
+            ultimaAccion:       deal.proximaAccion || 'Sin registrar',
+            vendedor:           perfilV.nombre,
+            _vendedorProfileId: vendedor.id,
+          }, perfilV);
+          enviados.push(keyS);
+        }
+      });
+    });
+  }
+
   localStorage.setItem(HOY_KEY, JSON.stringify(enviados));
+}
+/* ── VISTA: FORMULARIO DE PROSPECTO ────────────────────────── */
+function prospectoForm() {
+  document.getElementById('content').innerHTML = `
+    <section id="view-prospecto-form"
+             class="view"
+             data-view="prospecto-form"
+             aria-label="Formulario de prospecto">
+
+      <div style="max-width:560px;margin:40px auto;padding:32px 16px">
+
+        <div style="text-align:center;margin-bottom:32px">
+          <div style="font-size:48px;margin-bottom:12px">🙋</div>
+          <h2 style="font-size:22px;font-weight:700;color:var(--ink);margin:0 0 6px">
+            ¡Hola! Cuéntanos sobre ti
+          </h2>
+          <p style="font-size:14px;color:var(--n-500);margin:0">
+            Completa el formulario y un asesor NODE se pondrá en contacto contigo.
+          </p>
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:28px;display:flex;flex-direction:column;gap:18px">
+
+          <div class="field">
+            <label class="label" for="pf-nombre">Nombre completo <span class="req">*</span></label>
+            <input type="text" id="pf-nombre" class="input" placeholder="Ej: Ana García" autocomplete="name">
+          </div>
+
+          <div class="field">
+            <label class="label" for="pf-empresa">Empresa / Negocio</label>
+            <input type="text" id="pf-empresa" class="input" placeholder="Ej: Fotografía AG">
+          </div>
+
+          <div class="form-row">
+            <div class="field">
+              <label class="label" for="pf-whatsapp">WhatsApp <span class="req">*</span></label>
+              <input type="tel" id="pf-whatsapp" class="input" placeholder="5512345678" inputmode="tel">
+            </div>
+            <div class="field">
+              <label class="label" for="pf-email">Correo electrónico</label>
+              <input type="email" id="pf-email" class="input" placeholder="ana@empresa.com">
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="label" for="pf-interes">¿En qué podemos ayudarte? <span class="req">*</span></label>
+            <select id="pf-interes" class="input">
+              <option value="">— Selecciona una opción —</option>
+              <option value="sitio_web">Sitio web / Landing page</option>
+              <option value="ecommerce">Tienda en línea</option>
+              <option value="crm">CRM / Sistema de ventas</option>
+              <option value="marketing">Marketing digital</option>
+              <option value="app">Aplicación móvil</option>
+              <option value="otro">Otro / No sé aún</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label class="label" for="pf-mensaje">Mensaje adicional</label>
+            <textarea id="pf-mensaje" class="input textarea" rows="3"
+              placeholder="Cuéntanos más sobre tu proyecto o necesidad..."></textarea>
+          </div>
+
+          <div id="pf-error" class="login-error hidden" role="alert" aria-live="polite">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+              fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            Por favor completa los campos obligatorios.
+          </div>
+
+          <button class="btn btn-primary" style="width:100%;justify-content:center"
+            onclick="enviarProspecto()">
+            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24"
+              fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <line x1="22" y1="2" x2="11" y2="13"/>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+            </svg>
+            Enviar solicitud
+          </button>
+
+        </div>
+
+        <p style="text-align:center;font-size:12px;color:var(--n-400);margin-top:20px">
+          NODE Soluciones Tecnológicas · Tu información es confidencial
+        </p>
+
+      </div>
+    </section>
+  `;
+}
+
+/* ── Enviar formulario de prospecto ── */
+function enviarProspecto() {
+  const nombre   = document.getElementById('pf-nombre').value.trim();
+  const whatsapp = document.getElementById('pf-whatsapp').value.trim();
+  const interes  = document.getElementById('pf-interes').value;
+  const errEl    = document.getElementById('pf-error');
+
+  if (!nombre || !whatsapp || !interes) {
+    errEl.classList.remove('hidden');
+    return;
+  }
+  errEl.classList.add('hidden');
+
+  const empresa = document.getElementById('pf-empresa').value.trim();
+  const email   = document.getElementById('pf-email').value.trim();
+  const mensaje = document.getElementById('pf-mensaje').value.trim();
+
+  const nuevoContacto = {
+    id:            'c_' + Date.now(),
+    nombre,
+    empresa,
+    whatsapp,
+    email,
+    fuente:        'Formulario web',
+    monto:         0,
+    notas:         'Interés: ' + interes + (mensaje ? '\n' + mensaje : ''),
+    creadoEn:      Date.now(),
+    actualizadoEn: Date.now(),
+  };
+  S.contactos.push(nuevoContacto);
+  saveState();
+
+  // ── Notificar a admin y director de ventas que llegó un prospecto ──
+  const _datosProspecto = {
+    titulo:             'Nuevo prospecto registrado',
+    contacto:           nombre,
+    valor:              'Por determinar',
+    proximaAccion:      'Contactar al prospecto registrado desde el formulario web',
+    vendedor:           'Formulario web (auto-registro)',
+    _vendedorProfileId: null,  // no viene de un vendedor individual
+  };
+  // Acumular en buzón admin y ventas
+  ['admin','ventas'].forEach(dest => {
+    const id    = 'n' + Date.now() + Math.random().toString(36).slice(2, 6);
+    const notif = { id, tipo: 'prospecto_nuevo', datos: _datosProspecto, perfil: null, ts: Date.now(), enviada: false };
+    const lista = getNotifDe(dest);
+    lista.unshift(notif);
+    if (lista.length > 100) lista.length = 100;
+    saveNotifDe(dest, lista);
+  });
+  actualizarBadge();
+  // Enviar WA a admin y directores
+  notificarWhatsApp('deal_nuevo', _datosProspecto, 'admin');
+  notificarWhatsApp('deal_nuevo', _datosProspecto, 'ventas');
+
+  document.getElementById('content').innerHTML = `
+    <div style="max-width:480px;margin:80px auto;text-align:center;padding:16px">
+      <div style="font-size:56px;margin-bottom:16px">✅</div>
+      <h2 style="font-size:22px;font-weight:700;color:var(--ink);margin:0 0 10px">
+        ¡Solicitud enviada!
+      </h2>
+      <p style="font-size:15px;color:var(--n-500);margin:0 0 6px">
+        Gracias, <strong>${nombre}</strong>. Hemos recibido tus datos.
+      </p>
+      <p style="font-size:14px;color:var(--n-400)">
+        Un asesor NODE te contactará pronto por WhatsApp.
+      </p>
+    </div>
+  `;
+}
+/* ═══════════════════════════════════════════════════════════════
+   VISTA CONSOLIDADA — ADMIN / DIRECTOR DE VENTAS
+   Permite ver el pipeline, contactos y actividades de CADA
+   vendedor individualmente, más un resumen global de todos.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Estado del selector de vendedor (para admin/ventas) ── */
+const VISTA_VENDEDOR = {
+  vendedorId:  null,   // null = vista global de todos
+  seccion:     'pipeline', // pipeline | contactos | actividades
+};
+
+/* ── Obtener todos los datos agregados de todos los vendedores ── */
+function getAllVendedoresData() {
+  const vendedores = getProfiles()['venta'] || [];
+  return vendedores.map(v => {
+    const data = getVendedorData(v.id);
+    return {
+      perfil:      v,
+      contactos:   data.contactos   || [],
+      deals:       data.deals       || [],
+      actividades: data.actividades || [],
+    };
+  });
+}
+
+/* ── Obtener datos de un vendedor específico o del global ── */
+function getDataParaVista(vendedorId) {
+  if (!vendedorId) {
+    // Vista global: mezclar todos los vendedores
+    const todos = getAllVendedoresData();
+    return {
+      contactos:   todos.flatMap(v => v.contactos),
+      deals:       todos.flatMap(v => v.deals),
+      actividades: todos.flatMap(v => v.actividades),
+    };
+  }
+  return getVendedorData(vendedorId);
+}
+
+/* ── Render del selector de vendedor (tabs) ── */
+function renderVendedorSelectorHTML(seccionActiva) {
+  const vendedores = getProfiles()['venta'] || [];
+  const sel        = VISTA_VENDEDOR.vendedorId;
+
+  const tabs = [
+    { id: null, label: '📊 Todos', sub: 'Vista global' },
+    ...vendedores.map(v => ({
+      id:    v.id,
+      label: `${v.emoji} ${v.nombre.split(' ')[0]}`,
+      sub:   v.cargo,
+    })),
+  ];
+
+  const tabsHTML = tabs.map(t => `
+    <button
+      class="vendedor-tab${sel === t.id ? ' active' : ''}"
+      onclick="seleccionarVendedor(${t.id ? `'${t.id}'` : 'null'}, '${seccionActiva}')"
+      title="${t.sub}"
+    >
+      ${t.label}
+      ${t.id ? (() => {
+        const d = getVendedorData(t.id);
+        const activos = (d.deals || []).filter(x => !['ganado','perdido'].includes(x.etapa)).length;
+        return activos > 0 ? `<span class="vendedor-tab-badge">${activos}</span>` : '';
+      })() : ''}
+    </button>
+  `).join('');
+
+  // Stats rápidas del vendedor seleccionado
+  const data   = getDataParaVista(sel);
+  const activos = data.deals.filter(d => !['ganado','perdido'].includes(d.etapa));
+  const ganados = data.deals.filter(d => d.etapa === 'ganado');
+  const pipeline = activos.reduce((s,d) => s+(d.valor||0), 0);
+
+  const nombreVendedor = sel
+    ? (getProfileById('venta', sel)?.nombre || '—')
+    : 'Todos los vendedores';
+
+  return `
+    <div class="vendedor-selector-wrap">
+      <div class="vendedor-selector-header">
+        <div class="vendedor-selector-label">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+            fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+          Vista de vendedor
+        </div>
+        <div class="vendedor-selector-stats">
+          <span class="vendedor-stat-chip">
+            <strong style="color:var(--indigo)">${activos.length}</strong> activos
+          </span>
+          <span class="vendedor-stat-chip">
+            <strong style="color:var(--teal)">${fmtMXN(pipeline)}</strong> pipeline
+          </span>
+          <span class="vendedor-stat-chip">
+            <strong style="color:#10B981">${ganados.length}</strong> ganados
+          </span>
+        </div>
+      </div>
+      <div class="vendedor-tabs" role="tablist">
+        ${tabsHTML}
+      </div>
+    </div>
+  `;
+}
+
+function seleccionarVendedor(vendedorId, seccion) {
+  VISTA_VENDEDOR.vendedorId = vendedorId;
+  VISTA_VENDEDOR.seccion    = seccion || 'pipeline';
+  // Re-renderizar la sección actual
+  if      (seccion === 'pipeline')    pipelineAdmin();
+  else if (seccion === 'contactos')   contactosAdmin();
+  else if (seccion === 'actividades') actividadesAdmin();
+}
+
+/* ══════════════════════════════════════════════════════════════
+   PIPELINE — ADMIN / DIRECTOR: con selector de vendedor
+   ══════════════════════════════════════════════════════════════ */
+function pipelineAdmin() {
+  VISTA_VENDEDOR.seccion = 'pipeline';
+  const data     = getDataParaVista(VISTA_VENDEDOR.vendedorId);
+  const deals    = data.deals;
+  const contactos = data.contactos;
+
+  // Helper local — buscar contacto dentro del dataset del vendedor
+  const getC = (id) => contactos.find(c => c.id === id) || S.contactos.find(c => c.id === id);
+
+  const nonClosed    = ['ganado','perdido'];
+  const totalActive  = deals.filter(d => !nonClosed.includes(d.etapa)).reduce((s,d) => s+(d.valor||0), 0);
+  const totalGanado  = deals.filter(d => d.etapa === 'ganado').reduce((s,d) => s+(d.valor||0), 0);
+  const totalDeals   = deals.filter(d => !nonClosed.includes(d.etapa)).length;
+
+  let html = renderVendedorSelectorHTML('pipeline');
+
+  html += `
+  <div class="pipeline-header">
+    <div class="pipeline-stats">
+      <span class="pipe-stat">
+        <span class="pipe-stat-label">Pipeline activo</span>
+        <strong class="pipe-stat-val indigo">${fmtMXN(totalActive)}</strong>
+      </span>
+      <span class="pipe-stat-sep"></span>
+      <span class="pipe-stat">
+        <span class="pipe-stat-label">Deals activos</span>
+        <strong class="pipe-stat-val teal">${totalDeals}</strong>
+      </span>
+      <span class="pipe-stat-sep"></span>
+      <span class="pipe-stat">
+        <span class="pipe-stat-label">Ganado total</span>
+        <strong class="pipe-stat-val green">${fmtMXN(totalGanado)}</strong>
+      </span>
+    </div>
+  </div>
+  <div class="pipeline-phases-container">`;
+
+  FASES.forEach(fase => {
+    const faseEtapas = ETAPAS.filter(e => e.fase === fase.id);
+    const faseDeals  = deals.filter(d => faseEtapas.some(e => e.id === d.etapa));
+    const faseValue  = faseDeals.reduce((s,d) => s+(d.valor||0), 0);
+
+    html += `
+    <div class="fase-group">
+      <div class="fase-header" style="background:${fase.bg}">
+        <div class="fase-header-left">
+          <span class="fase-num" style="background:${fase.color}">F${fase.n}</span>
+          <div>
+            <div class="fase-title" style="color:${fase.tc}">${fase.label}</div>
+            <div class="fase-desc"  style="color:${fase.tc}aa">${fase.desc}</div>
+          </div>
+        </div>
+        <div class="fase-header-right">
+          <span class="fase-badge" style="background:${fase.color}1a;color:${fase.tc}">${faseDeals.length} deal${faseDeals.length!==1?'s':''}</span>
+          ${faseValue>0?`<span class="fase-badge" style="background:${fase.color}1a;color:${fase.tc}">${fmtMXN(faseValue)}</span>`:''}
+        </div>
+      </div>
+      <div class="fase-cols">`;
+
+    faseEtapas.forEach(e => {
+      const etapaDeals = deals.filter(d => d.etapa === e.id);
+      const colValue   = etapaDeals.reduce((s,d) => s+(d.valor||0), 0);
+      html += `
+        <div class="kanban-col">
+          <div class="kanban-head" style="background:${e.bg};color:${e.tc}">
+            <span>${e.emoji} ${e.label}</span>
+            <span class="col-count">${etapaDeals.length}</span>
+          </div>
+          <div class="kanban-gate-chip" title="${e.gate}">
+            <svg xmlns="http://www.w3.org/2000/svg" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+            ${e.gate}
+          </div>
+          ${colValue>0?`<div class="col-value-row" style="color:${e.tc}">${fmtMXN(colValue)}</div>`:''}
+          <div class="kanban-cards" style="pointer-events:none">
+            ${etapaDeals.map(d => dealCardAdminHTML(d, getC)).join('')}
+          </div>
+        </div>`;
+    });
+    html += `</div></div>`;
+  });
+
+  html += `</div>`;
+  document.getElementById('content').innerHTML = html;
+}
+
+function dealCardAdminHTML(d, getContactoFn) {
+  const c    = getContactoFn(d.contactoId);
+  const over = isOverdue(d.fechaLimite) && !['ganado','perdido'].includes(d.etapa);
+  const vendedor = getProfileById('venta', d.vendedorId);
+
+  return `<div class="deal-card deal-card-readonly"
+    title="${escapeHTML(d.titulo)} — Solo lectura en vista admin">
+    ${vendedor ? `<div class="deal-vendedor-chip">
+      <span style="font-size:13px">${vendedor.emoji}</span>
+      <span>${escapeHTML(vendedor.nombre)}</span>
+    </div>` : ''}
+    <div class="deal-title">${escapeHTML(d.titulo)}</div>
+    ${c ? `<div class="deal-contact-chip">
+      <div class="mini-avatar">${initials(c.nombre)}</div>${escapeHTML(c.nombre)}
+    </div>` : ''}
+    <div class="deal-value">${fmtMXN(d.valor)}</div>
+    <div class="deal-footer">
+      <div class="deal-next">${d.proximaAccion ? '→ '+escapeHTML(d.proximaAccion) : ''}</div>
+      ${d.fechaLimite ? `<div class="deal-date${over?' overdue':''}">${over?'⚠️ ':''}${fmtDate(d.fechaLimite)}</div>` : ''}
+    </div>
+  </div>`;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   CONTACTOS — ADMIN / DIRECTOR: con selector de vendedor
+   ══════════════════════════════════════════════════════════════ */
+function contactosAdmin() {
+  VISTA_VENDEDOR.seccion = 'contactos';
+  const data     = getDataParaVista(VISTA_VENDEDOR.vendedorId);
+  const list     = [...data.contactos].sort((a,b) => b.actualizadoEn - a.actualizadoEn);
+  const deals    = data.deals;
+  const getDeals = (cid) => deals.filter(d => d.contactoId === cid).sort((x,y) => y.actualizadoEn - x.actualizadoEn);
+
+  let html = renderVendedorSelectorHTML('contactos');
+
+  html += `
+  <div class="view-header">
+    <span class="badge badge-neutral">${list.length} contactos</span>
+    <div class="view-filters">
+      <button class="btn btn-ghost btn-sm" onclick="exportCSVAdmin('contactos')" title="Exportar CSV">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        CSV
+      </button>
+    </div>
+  </div>`;
+
+  if (list.length === 0) {
+    html += `<div class="empty"><div class="empty-icon">👥</div><p class="empty-title">Sin contactos</p><p class="empty-desc">Este vendedor aún no tiene contactos registrados.</p></div>`;
+  } else {
+    html += `<div class="contacts-table-wrap">
+      <table class="contacts-table">
+        <thead><tr>
+          <th>Contacto</th><th>Empresa</th><th>Fuente</th>
+          <th>Monto est.</th><th>Etapa actual</th><th>Actualización</th>
+        </tr></thead>
+        <tbody>`;
+
+    list.forEach(c => {
+      const cDeals   = getDeals(c.id);
+      const dealAct  = cDeals.find(d => d.etapa !== 'perdido') || cDeals[0];
+      const etapa    = dealAct ? getEtapa(dealAct.etapa) : null;
+
+      // Vendedor asignado
+      const vendedorPerfil = VISTA_VENDEDOR.vendedorId
+        ? getProfileById('venta', VISTA_VENDEDOR.vendedorId)
+        : (dealAct?.vendedorId ? getProfileById('venta', dealAct.vendedorId) : null);
+
+      html += `<tr>
+        <td><div class="contact-row-name">
+          <div class="contact-avatar" style="background:${etapa?.color||'var(--indigo)'}">
+            ${initials(c.nombre)}
+          </div>
+          <div>
+            <div class="contact-name">${escapeHTML(c.nombre)}</div>
+            <div class="contact-email">${escapeHTML(c.email||'—')}</div>
+          </div>
+        </div></td>
+        <td style="font-size:13px;color:var(--n-600)">${escapeHTML(c.empresa||'—')}</td>
+        <td>
+          <span class="badge badge-indigo">${escapeHTML(c.fuente||'—')}</span>
+          ${vendedorPerfil ? `<span class="badge" style="background:var(--n-100);color:var(--n-700);margin-left:4px;font-size:10px">${vendedorPerfil.emoji} ${vendedorPerfil.nombre.split(' ')[0]}</span>` : ''}
+        </td>
+        <td class="money" style="font-size:13px">${fmtMXN(c.monto)}</td>
+        <td>${etapa ? `<span class="badge" style="background:${etapa.bg};color:${etapa.tc};border:1px solid ${etapa.color}33">${etapa.emoji} ${etapa.label}</span>` : '<span class="badge badge-neutral">Sin deal</span>'}</td>
+        <td style="font-size:12px;color:var(--n-500)">${timeAgo(c.actualizadoEn)}</td>
+      </tr>`;
+    });
+
+    html += `</tbody></table></div>`;
+  }
+
+  document.getElementById('content').innerHTML = html;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   ACTIVIDADES — ADMIN / DIRECTOR: con selector de vendedor
+   ══════════════════════════════════════════════════════════════ */
+function actividadesAdmin() {
+  VISTA_VENDEDOR.seccion = 'actividades';
+  const data  = getDataParaVista(VISTA_VENDEDOR.vendedorId);
+  const list  = [...data.actividades].sort((a,b) => b.creadoEn - a.creadoEn);
+  const allC  = [...data.contactos, ...S.contactos];
+  const getC  = (id) => allC.find(c => c.id === id);
+
+  let html = renderVendedorSelectorHTML('actividades');
+
+  html += `
+  <div class="view-header" style="margin-bottom:12px">
+    <span class="badge badge-neutral">${list.length} registros</span>
+    <button class="btn btn-ghost btn-sm" onclick="exportCSVAdmin('actividades')">
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      CSV
+    </button>
+  </div>`;
+
+  if (list.length === 0) {
+    html += `<div class="empty"><div class="empty-icon">📋</div><p class="empty-title">Sin actividades</p><p class="empty-desc">Este vendedor aún no tiene actividades registradas.</p></div>`;
+  } else {
+    html += `<div class="activity-feed">`;
+    list.forEach(a => {
+      const c = getC(a.contactoId);
+      html += `<div class="activity-item">
+        <div class="act-icon" style="background:${ACT_BG[a.tipo]||'#f8f9fb'}">${ACT_ICONS[a.tipo]||'📌'}</div>
+        <div class="act-body">
+          <div class="act-meta">
+            <span class="act-contact">${escapeHTML(c?.nombre||'Contacto eliminado')}</span>
+            <span class="act-type">${ACT_LABELS[a.tipo]||a.tipo}</span>
+            <span class="act-time">${timeAgo(a.creadoEn)}</span>
+          </div>
+          <p class="act-desc">${escapeHTML(a.descripcion)}</p>
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+
+  document.getElementById('content').innerHTML = html;
+}
+
+/* ── Exportar CSV de vista admin ── */
+function exportCSVAdmin(tipo) {
+  const data = getDataParaVista(VISTA_VENDEDOR.vendedorId);
+  const allC = [...data.contactos, ...S.contactos];
+  const getC = (id) => allC.find(c => c.id === id);
+  let rows = [], filename = '';
+
+  if (tipo === 'contactos') {
+    filename = 'node-admin-contactos.csv';
+    rows = [['Nombre','Empresa','WhatsApp','Email','Fuente','Monto MXN','Creado']];
+    data.contactos.forEach(c => rows.push([c.nombre,c.empresa,c.whatsapp,c.email,c.fuente,c.monto,fmtDate(c.creadoEn)]));
+  } else if (tipo === 'actividades') {
+    filename = 'node-admin-actividades.csv';
+    rows = [['Tipo','Contacto','Descripción','Fecha']];
+    data.actividades.forEach(a => rows.push([ACT_LABELS[a.tipo]||a.tipo,getC(a.contactoId)?.nombre||'',a.descripcion,fmtDate(a.creadoEn)]));
+  }
+
+  const csv  = rows.map(r => r.map(v => `"${String(v||'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob(['\uFEFF'+csv], { type:'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = Object.assign(document.createElement('a'), { href:url, download:filename });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast('CSV exportado', filename, 'success');
+}
+
+/* ══════════════════════════════════════════════════════════════
+   DASHBOARD ADMIN — Resumen de todos los vendedores
+   ══════════════════════════════════════════════════════════════ */
+function dashboardAdmin() {
+  const todosData = getAllVendedoresData();
+
+  // Métricas globales
+  const allDeals  = todosData.flatMap(v => v.deals);
+  const allActs   = todosData.flatMap(v => v.actividades);
+  const activos   = allDeals.filter(d => !['ganado','perdido'].includes(d.etapa));
+  const pipeTotal = activos.reduce((s,d) => s+(d.valor||0), 0);
+  const ganados   = allDeals.filter(d => d.etapa === 'ganado').length;
+  const semanaAgo = Date.now() - 7 * 86_400_000;
+  const actsWeek  = allActs.filter(a => a.creadoEn >= semanaAgo).length;
+
+  // Cargar los datos globales en S.deals / S.actividades para que buildCharts() los use
+  // (solo lectura — no se persiste, se reemplaza al cambiar de vista)
+  S.deals       = allDeals;
+  S.actividades = allActs;
+  S.contactos   = todosData.flatMap(v => v.contactos);
+
+  // Actividades recientes y top deals globales para los paneles inferiores
+  const recentActs = [...allActs].sort((a,b) => b.creadoEn - a.creadoEn).slice(0, 5);
+  const topDeals   = [...activos].sort((a,b) => b.valor - a.valor).slice(0, 5);
+
+  let html = `
+  <div class="stats-grid">
+    ${mkStatCard('👥','Vendedores activos', todosData.length, '#EEF2FF','#4338CA')}
+    ${mkStatCard('💰','Pipeline total', fmtMXN(pipeTotal), '#F0FDFB','#0D9488')}
+    ${mkStatCard('✅','Deals ganados total', ganados, '#D1FAE5','#10B981')}
+    ${mkStatCard('📋','Actividades / semana', actsWeek, '#FEF3C7','#F59E0B')}
+  </div>
+
+  <div class="dashboard-cols">
+    <div class="chart-card">
+      <div class="chart-title">Pipeline por etapa</div>
+      <div class="chart-sub">Valor de deals activos por etapa · todos los vendedores (MXN)</div>
+      <div class="chart-canvas"><canvas id="chart-bar"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Distribución de deals</div>
+      <div class="chart-sub">Cantidad de deals por estado · todos los vendedores</div>
+      <div class="chart-canvas"><canvas id="chart-donut"></canvas></div>
+    </div>
+  </div>
+
+  <div class="dashboard-bottom">
+    <div class="chart-card">
+      <div class="panel-title">Actividades recientes</div>
+      ${recentActs.length
+        ? recentActs.map(a => miniActHTML(a)).join('')
+        : emptyState('📋','Sin actividades','Los vendedores aún no tienen actividades.')}
+    </div>
+    <div class="chart-card">
+      <div class="panel-title">Top deals en pipeline</div>
+      ${topDeals.length
+        ? topDeals.map(d => miniDealHTML(d)).join('')
+        : emptyState('⭐','Sin deals activos','Agrega deals al pipeline.')}
+    </div>
+  </div>
+
+  <div class="admin-vendedores-grid">`;
+
+  todosData.forEach(({ perfil, deals, contactos, actividades }) => {
+    const act    = deals.filter(d => !['ganado','perdido'].includes(d.etapa));
+    const pipe   = act.reduce((s,d) => s+(d.valor||0), 0);
+    const won    = deals.filter(d => d.etapa === 'ganado').length;
+    const actsV  = actividades.filter(a => a.creadoEn >= semanaAgo).length;
+    const vencidos = act.filter(d => isOverdue(d.fechaLimite)).length;
+
+    // Top 3 deals activos por valor
+    const topDeals = [...act].sort((a,b) => b.valor - a.valor).slice(0,3);
+
+    html += `
+    <div class="vendedor-card-admin">
+      <div class="vendedor-card-header">
+        <div class="vendedor-card-avatar">${perfil.emoji}</div>
+        <div class="vendedor-card-info">
+          <div class="vendedor-card-name">${escapeHTML(perfil.nombre)}</div>
+          <div class="vendedor-card-cargo">${escapeHTML(perfil.cargo)}</div>
+        </div>
+        <div class="vendedor-card-actions">
+          <button class="btn btn-secondary btn-sm"
+            onclick="seleccionarVendedor('${perfil.id}','pipeline');navigate('pipeline')">
+            Pipeline
+          </button>
+          <button class="btn btn-ghost btn-sm"
+            onclick="seleccionarVendedor('${perfil.id}','contactos');navigate('contactos')">
+            Contactos
+          </button>
+        </div>
+      </div>
+
+      <div class="vendedor-card-stats">
+        <div class="vc-stat">
+          <div class="vc-stat-val" style="color:var(--indigo)">${act.length}</div>
+          <div class="vc-stat-lbl">Activos</div>
+        </div>
+        <div class="vc-stat">
+          <div class="vc-stat-val" style="color:var(--teal)">${fmtMXN(pipe)}</div>
+          <div class="vc-stat-lbl">Pipeline</div>
+        </div>
+        <div class="vc-stat">
+          <div class="vc-stat-val" style="color:#10B981">${won}</div>
+          <div class="vc-stat-lbl">Ganados</div>
+        </div>
+        <div class="vc-stat">
+          <div class="vc-stat-val" style="color:var(--n-600)">${contactos.length}</div>
+          <div class="vc-stat-lbl">Contactos</div>
+        </div>
+        <div class="vc-stat">
+          <div class="vc-stat-val" style="color:var(--n-600)">${actsV}</div>
+          <div class="vc-stat-lbl">Acts/sem</div>
+        </div>
+        ${vencidos > 0 ? `<div class="vc-stat">
+          <div class="vc-stat-val" style="color:var(--error)">${vencidos}</div>
+          <div class="vc-stat-lbl">Vencidos</div>
+        </div>` : ''}
+      </div>
+
+      ${topDeals.length > 0 ? `
+      <div class="vendedor-card-deals">
+        <div class="vc-deals-title">Top deals activos</div>
+        ${topDeals.map(d => {
+          const e = getEtapa(d.etapa);
+          const c = contactos.find(x => x.id === d.contactoId);
+          return `<div class="vc-deal-row">
+            <div class="vc-deal-info">
+              <div class="vc-deal-titulo">${escapeHTML(d.titulo)}</div>
+              <div class="vc-deal-contacto">${escapeHTML(c?.nombre||'—')}</div>
+            </div>
+            <div class="vc-deal-right">
+              <div class="money" style="font-size:12px;color:var(--indigo)">${fmtMXN(d.valor)}</div>
+              <span class="badge" style="background:${e.bg};color:${e.tc};font-size:10px">${e.emoji} ${e.label}</span>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>` : `<div style="padding:12px 16px;font-size:12px;color:var(--n-400);text-align:center">Sin deals activos</div>`}
+    </div>`;
+  });
+
+  html += `</div>`;
+  document.getElementById('content').innerHTML = html;
+
+  // Inicializar gráficas con el dataset global cargado en S
+  CHART_STATE.expandedFase = null;
+  requestAnimationFrame(buildCharts);
 }
