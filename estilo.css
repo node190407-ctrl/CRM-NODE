@@ -2482,6 +2482,27 @@ select.input {
 .notif-card-perfil-info { font-size: 10px; color: var(--n-600); line-height: 1.3; }
 .notif-card-perfil-info strong { color: var(--indigo); font-weight: 700; }
 
+/* Vendedor asignado al deal — visible solo para admin/director */
+.notif-card-vendedor {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 10px; color: var(--teal);
+  font-weight: 600;
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  background: var(--teal-25, #F0FDFB);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--teal-100, #99F6E4);
+}
+.notif-card-vendedor svg { flex-shrink: 0; opacity: 0.8; }
+
+/* Sub-label del rol en el header del panel */
+.notif-role-sub {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--n-400);
+  margin-left: 2px;
+}
+
 /* Botón enviar de la card */
 .notif-card-footer {
   display: flex; gap: 6px;
@@ -2525,4 +2546,280 @@ select.input {
 /* ── Responsive ── */
 @media (max-width: 440px) {
   .notif-panel { width: calc(100vw - 16px); right: 8px; }
+}
+/* ═══════════════════════════════════════════════════════════════
+   VISTA ADMIN / DIRECTOR — SELECTOR DE VENDEDOR
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Selector de vendedor (tabs) ── */
+.vendedor-selector-wrap {
+  background: var(--n-0);
+  border: 1px solid var(--n-200);
+  border-radius: var(--r-md);
+  padding: 14px 16px 0;
+  margin-bottom: 20px;
+  box-shadow: var(--sh-xs);
+}
+
+.vendedor-selector-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vendedor-selector-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--n-500);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+.vendedor-selector-stats {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.vendedor-stat-chip {
+  font-size: 12px;
+  color: var(--n-600);
+  background: var(--n-50);
+  border: 1px solid var(--n-200);
+  border-radius: var(--r-full);
+  padding: 3px 10px;
+  line-height: 1.4;
+}
+
+.vendedor-tabs {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding-bottom: 0;
+}
+.vendedor-tabs::-webkit-scrollbar { display: none; }
+
+.vendedor-tab {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--n-500);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  cursor: pointer;
+  transition: color 150ms, background 150ms, border-color 150ms;
+  white-space: nowrap;
+}
+.vendedor-tab:hover {
+  color: var(--ink);
+  background: var(--n-50);
+}
+.vendedor-tab.active {
+  color: var(--indigo);
+  font-weight: 600;
+  border-bottom-color: var(--indigo);
+  background: var(--indigo-50);
+}
+
+.vendedor-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--indigo);
+  color: white;
+  border-radius: var(--r-full);
+}
+
+/* ── Dashboard Admin: grid de tarjetas de vendedor ── */
+.admin-vendedores-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.vendedor-card-admin {
+  background: var(--n-0);
+  border: 1px solid var(--n-200);
+  border-radius: var(--r-md);
+  box-shadow: var(--sh-sm);
+  overflow: hidden;
+  transition: box-shadow 200ms, transform 200ms;
+}
+.vendedor-card-admin:hover {
+  box-shadow: var(--sh-md);
+  transform: translateY(-2px);
+}
+
+.vendedor-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid var(--n-100);
+}
+
+.vendedor-card-avatar {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  background: var(--indigo-50);
+  border-radius: var(--r-base);
+  border: 1px solid var(--indigo-200);
+  flex-shrink: 0;
+}
+
+.vendedor-card-info {
+  flex: 1;
+  min-width: 0;
+}
+.vendedor-card-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vendedor-card-cargo {
+  font-size: 11px;
+  color: var(--n-500);
+  margin-top: 2px;
+}
+
+.vendedor-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Stats strip */
+.vendedor-card-stats {
+  display: flex;
+  gap: 0;
+  background: var(--n-25);
+  border-bottom: 1px solid var(--n-100);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.vendedor-card-stats::-webkit-scrollbar { display: none; }
+
+.vc-stat {
+  flex: 1;
+  min-width: 64px;
+  text-align: center;
+  padding: 10px 8px;
+  border-right: 1px solid var(--n-100);
+}
+.vc-stat:last-child { border-right: none; }
+
+.vc-stat-val {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vc-stat-lbl {
+  font-size: 10px;
+  color: var(--n-400);
+  margin-top: 2px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+/* Deals section */
+.vendedor-card-deals {
+  padding: 12px 16px;
+}
+.vc-deals-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--n-400);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin-bottom: 8px;
+}
+.vc-deal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--n-100);
+}
+.vc-deal-row:last-child { border-bottom: none; }
+.vc-deal-info { flex: 1; min-width: 0; }
+.vc-deal-titulo {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vc-deal-contacto {
+  font-size: 11px;
+  color: var(--n-500);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vc-deal-right {
+  flex-shrink: 0;
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+/* ── Deal card — readonly en vista admin ── */
+.deal-card-readonly {
+  cursor: default !important;
+  pointer-events: none;
+  opacity: .96;
+}
+
+.deal-vendedor-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--indigo-50);
+  color: var(--indigo);
+  border: 1px solid var(--indigo-200);
+  border-radius: var(--r-full);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  margin-bottom: 6px;
+}
+
+/* ── Pipeline admin scrollable horizontal ── */
+.pipeline-phases-container {
+  overflow-x: auto;
+  padding-bottom: 12px;
 }
